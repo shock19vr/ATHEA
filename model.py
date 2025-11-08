@@ -594,6 +594,9 @@ class AnomalyClusterer:
         Returns:
             DataFrame with MITRE stage mappings
         """
+        print("\n" + "🔄 Starting MITRE stage classification...")
+        print(f"   Classifying {len(cluster_labels)} anomalies\n")
+        
         mitre_stages = []
         
         for idx, row in cluster_labels.iterrows():
@@ -602,11 +605,27 @@ class AnomalyClusterer:
             # Get feature values for this event
             features = features_df.loc[idx] if idx in features_df.index else {}
             
+            # Debug: Show what we're classifying
+            event_id = features.get('EventID') if hasattr(features, 'get') else features.get('EventID', 'Unknown')
+            
             # Heuristic mapping based on features (always attempt classification)
             stage = self._infer_mitre_stage(features)
             mitre_stages.append(stage)
+            
+            # Debug: Show result
+            print(f"   Index {idx}: EventID {event_id} → {stage}")
         
         cluster_labels['MITRE_Stage'] = mitre_stages
+        
+        # Debug: Print summary of classifications
+        print("\n" + "="*60)
+        print("MITRE STAGE CLASSIFICATION SUMMARY")
+        print("="*60)
+        stage_counts = pd.Series(mitre_stages).value_counts()
+        for stage, count in stage_counts.items():
+            print(f"  {stage}: {count} anomalies")
+        print("="*60 + "\n")
+        
         return cluster_labels
     
     def _infer_mitre_stage(self, features: pd.Series) -> str:
@@ -614,8 +633,45 @@ class AnomalyClusterer:
         Enhanced MITRE ATT&CK stage inference using EventID knowledge base first,
         then falling back to feature-based pattern matching.
         """
+        # ABSOLUTE RULE: Process creation OR command execution = ALWAYS Execution stage
+        event_id = features.get('EventID') if hasattr(features, 'get') else features['EventID'] if 'EventID' in features else None
+        
+        # Check for process creation EventIDs (handle string, int, float)
+        try:
+            event_id_int = int(float(event_id)) if pd.notna(event_id) else None
+            if event_id_int in [4688, 1]:  # Windows or Sysmon process creation
+                print(f"✅ FORCED EXECUTION: EventID {event_id_int} → Stage 2: Execution")
+                return 'Stage 2: Execution'
+        except (ValueError, TypeError) as e:
+            print(f"⚠️ EventID conversion error: {event_id} - {e}")
+            pass
+        
+        # Check for non-empty command/process fields (from extracted columns or EventData)
+        command_line = str(features.get('CommandLine', '')).strip()
+        process_name = str(features.get('ProcessName', '')).strip()
+        
+        # Also check EventData dictionary if available
+        event_data = features.get('EventData', {})
+        if isinstance(event_data, dict):
+            if not command_line or command_line == 'nan':
+                command_line = str(event_data.get('CommandLine', '')).strip()
+            if not process_name or process_name == 'nan':
+                process_name = str(event_data.get('ProcessName', '')).strip()
+                if not process_name:
+                    process_name = str(event_data.get('NewProcessName', '')).strip()
+        
+        # If command line exists and is not empty, it's ALWAYS execution
+        if command_line and command_line != 'nan' and len(command_line) > 0:
+            return 'Stage 2: Execution'
+        
+        # If process name exists and is not a system placeholder, it's ALWAYS execution
+        if process_name and process_name != 'nan' and len(process_name) > 0:
+            # Exclude system processes that aren't execution
+            system_processes = ['system', 'registry', 'idle', '-', 'none']
+            if process_name.lower() not in system_processes:
+                return 'Stage 2: Execution'
+        
         # FIRST: Use EventID knowledge base for accurate mapping
-        event_id = features.get('EventID')
         channel = features.get('Channel', None)
         
         if pd.notna(event_id):
@@ -672,19 +728,54 @@ class AnomalyClusterer:
         if features.get('IsNightTime', 0) > 0 and features.get('IsFailedLogin', 0) > 0:
             scores['Initial Access'] += 2  # Night-time login attempts
         
-        # Execution indicators
+        # Execution indicators - STRENGTHENED
         if features.get('IsProcessCreation', 0) > 0:
-            scores['Execution'] += 5
+            scores['Execution'] += 8  # Increased from 5
         if features.get('LogHasSuspicious', 0) > 0:
-            scores['Execution'] += 4
+            scores['Execution'] += 5  # Increased from 4
         if features.get('EventID') in [1, 4688]:  # Sysmon/Windows process creation
-            scores['Execution'] += 3
+            scores['Execution'] += 10  # STRONG indicator - increased from 3
+            scores['Initial Access'] = 0  # Process creation is NEVER initial access
         if features.get('LogHasPowerShell', 0) > 0:
-            scores['Execution'] += 6  # PowerShell is common in attacks
+            scores['Execution'] += 7  # PowerShell is common in attacks
         if features.get('LogHasCmd', 0) > 0:
-            scores['Execution'] += 3
+            scores['Execution'] += 5  # Increased from 3
         if features.get('LogHasScript', 0) > 0:
-            scores['Execution'] += 4
+            scores['Execution'] += 6  # Increased from 4
+        
+        # Specific execution processes - check RawLog and ProcessName
+        raw_log = str(features.get('RawLog', '')).lower()
+        process_name = str(features.get('ProcessName', '')).lower()
+        
+        # Script execution engines
+        if 'cscript' in raw_log or 'wscript' in raw_log or 'cscript' in process_name or 'wscript' in process_name:
+            scores['Execution'] += 10  # Strong script execution indicator
+            scores['Initial Access'] = 0
+        
+        # Console host (spawned by command execution)
+        if 'conhost' in raw_log or 'conhost' in process_name:
+            scores['Execution'] += 8  # Console host for command execution
+            scores['Initial Access'] = 0
+        
+        # PowerShell execution
+        if 'powershell' in raw_log or 'pwsh' in raw_log or 'powershell' in process_name:
+            scores['Execution'] += 9
+            scores['Initial Access'] = 0
+        
+        # Command prompt execution
+        if 'cmd.exe' in raw_log or 'cmd.exe' in process_name or 'cmd ' in raw_log:
+            scores['Execution'] += 8
+            scores['Initial Access'] = 0
+        
+        # Script files being executed
+        if '.vbs' in raw_log or '.js' in raw_log or '.bat' in raw_log or '.ps1' in raw_log:
+            scores['Execution'] += 9  # Script file execution
+            scores['Initial Access'] = 0
+        
+        # Common execution utilities
+        if any(util in raw_log or util in process_name for util in ['rundll32', 'regsvr32', 'mshta', 'wmic']):
+            scores['Execution'] += 8
+            scores['Initial Access'] = 0
         
         # Persistence indicators - ENHANCED to reduce Initial Access collision
         # Service-based persistence (CRITICAL)
@@ -765,7 +856,26 @@ class AnomalyClusterer:
         if (features.get('EventID') in [7045, 4697, 4720, 4723, 4738, 4704, 4705, 4717, 4718, 
                                         4735, 4737, 4755, 4794, 19, 20, 21] or 
             features.get('IsScheduledTask', 0) > 0):
-            scores['Initial Access'] = max(0, scores['Initial Access'] - 3)
+            scores['Initial Access'] = max(0, scores['Initial Access'] - 5)
+        
+        # Post-compromise activities should NEVER be Initial Access
+        post_compromise_events = [
+            4656, 4663, 4661, 4662,  # Object/file access (already inside)
+            4688, 1,  # Process creation (already executing)
+            7045, 4697,  # Service installation (admin access)
+            4698, 4699, 4700, 4701,  # Scheduled tasks (admin access)
+            4720, 4722, 4723, 4738,  # Account manipulation (admin access)
+            4704, 4705, 4717, 4718,  # Privilege/security changes (admin access)
+            4732, 4735, 4737, 4755,  # Group modifications (admin access)
+            12, 13, 14, 4657,  # Registry modification (already inside)
+            19, 20, 21,  # WMI persistence (admin access)
+            1102, 104, 1100, 4719,  # Log clearing/audit changes (admin access)
+            8, 10,  # Process injection/access (already inside)
+            6,  # Driver loading (admin access)
+        ]
+        
+        if features.get('EventID') in post_compromise_events:
+            scores['Initial Access'] = 0  # These are NEVER initial access
         
         # Privilege Escalation indicators
         if features.get('EventID') in [4672, 4673, 4674]:  # Special privileges
@@ -812,8 +922,29 @@ class AnomalyClusterer:
         if features.get('EventID') == 4776:  # NTLM authentication (Pass-the-Hash)
             scores['Credential Access'] += 6  # Increased from 4
             scores['Lateral Movement'] += 4
-        if features.get('EventID') == 4656:  # Handle to object (LSASS, SAM access)
-            scores['Credential Access'] += 7
+        if features.get('EventID') == 4656:  # Handle to object - context matters
+            # Check what object is being accessed
+            raw_log = str(features.get('RawLog', '')).lower()
+            object_name = str(features.get('ObjectName', '')).lower()
+            
+            # Credential-related objects
+            if any(x in raw_log or x in object_name for x in ['lsass', 'sam', 'security', 'ntds.dit', 'credential']):
+                scores['Credential Access'] += 9
+                scores['Initial Access'] = 0  # Not initial access
+            # Certificate store access (Defense Evasion)
+            elif any(x in raw_log or x in object_name for x in ['certificate', 'enterprisecertificates', 'root\\certificates']):
+                scores['Defense Evasion'] += 8
+                scores['Persistence'] += 6
+                scores['Initial Access'] = 0  # Not initial access
+            # Registry modification (Defense Evasion or Persistence)
+            elif 'registry' in raw_log or 'registry' in object_name:
+                scores['Defense Evasion'] += 6
+                scores['Persistence'] += 5
+                scores['Initial Access'] = 0  # Not initial access
+            # File access (Collection)
+            else:
+                scores['Collection'] += 5
+                scores['Discovery'] += 3
         if features.get('EventID') == 4661:  # SAM/AD object access
             scores['Credential Access'] += 8  # High risk for credential theft
             scores['Discovery'] += 5
@@ -910,6 +1041,14 @@ class AnomalyClusterer:
         # Find the stage with highest score
         # Always return best guess, even if scores are low or zero
         best_stage = max(scores.items(), key=lambda x: x[1])[0]
+        
+        # Debug logging for EventID 4688 to verify classification
+        if features.get('EventID') == 4688:
+            print(f"DEBUG EventID 4688: Execution={scores['Execution']}, Initial Access={scores['Initial Access']}, Best={best_stage}")
+        
+        # Additional debug for process creation
+        if features.get('IsProcessCreation', 0) > 0:
+            print(f"DEBUG Process Creation: EventID={event_id}, Execution={scores['Execution']}, Initial Access={scores['Initial Access']}, Best={best_stage}")
         
         # Map to simplified MITRE stages for display
         stage_mapping = {
@@ -1029,7 +1168,7 @@ class AnomalyClusterer:
                 score += 3  # High entropy = obfuscation
             patterns.append((score, 2, '💻 PowerShell Exploit'))
         
-        # Pattern 3: Suspicious Process Execution
+        # Pattern 3: Process Execution (Stage 2)
         if features.get('IsProcessCreation', 0) > 0:
             score = 8
             if features.get('LogHasCmd', 0) > 0:
@@ -1038,7 +1177,7 @@ class AnomalyClusterer:
                 score += 5  # Suspicious commands
             if features.get('IsNightTime', 0) > 0:
                 score += 2
-            patterns.append((score, 3, '⚙️ Suspicious Process Execution'))
+            patterns.append((score, 3, '⚙️ Process Execution (Stage 2)'))
         
         # Pattern 4: Lateral Movement
         if features.get('UniqueIPCount', 0) > 3 or features.get('IsNetworkConnection', 0) > 0:

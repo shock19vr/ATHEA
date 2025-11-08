@@ -263,6 +263,132 @@ class Visualizer:
         
         return fig
     
+    def plot_severity_distribution(self, df: pd.DataFrame) -> go.Figure:
+        """
+        Create pie chart visualization of event risk severity (Low/Medium/High/Critical).
+        
+        Args:
+            df: DataFrame with risk score or anomaly score columns
+            
+        Returns:
+            Plotly figure
+        """
+        # Determine risk level based on available data
+        df_plot = df.copy()
+        
+        # Priority 1: Use EventID_RiskScore if available
+        if 'EventID_RiskScore' in df_plot.columns:
+            df_plot['RiskLevel'] = df_plot['EventID_RiskScore'].apply(self._map_risk_level)
+        # Priority 2: Use AnomalyScoreNormalized
+        elif 'AnomalyScoreNormalized' in df_plot.columns:
+            df_plot['RiskLevel'] = df_plot['AnomalyScoreNormalized'].apply(
+                lambda x: 'Critical' if x > 0.8 else 'High' if x > 0.6 else 'Medium' if x > 0.3 else 'Low'
+            )
+        # Priority 3: Use Anomaly flag
+        elif 'Anomaly' in df_plot.columns:
+            df_plot['RiskLevel'] = df_plot['Anomaly'].apply(
+                lambda x: 'High' if x == 1 else 'Low'
+            )
+        else:
+            # No risk data available
+            return go.Figure().update_layout(
+                title='Risk Severity Distribution',
+                annotations=[dict(
+                    text='No risk data available',
+                    xref='paper', yref='paper',
+                    x=0.5, y=0.5, showarrow=False,
+                    font=dict(size=16)
+                )]
+            )
+        
+        # Define risk order and colors (SIEM-style)
+        risk_colors = {
+            'Critical': '#8B0000',      # Dark Red
+            'High': '#e74c3c',          # Red
+            'Medium': '#f39c12',        # Orange
+            'Low': '#2ecc71'            # Green
+        }
+        
+        # Count by risk level
+        risk_counts = df_plot['RiskLevel'].value_counts().reset_index()
+        risk_counts.columns = ['Risk', 'Count']
+        
+        # Sort by risk order
+        risk_order = ['Critical', 'High', 'Medium', 'Low']
+        risk_counts['SortOrder'] = risk_counts['Risk'].map(
+            {s: i for i, s in enumerate(risk_order)}
+        )
+        risk_counts = risk_counts.sort_values('SortOrder').drop('SortOrder', axis=1)
+        
+        # Get colors in order
+        colors = [risk_colors.get(s, '#95a5a6') for s in risk_counts['Risk']]
+        
+        # Build hover text with anomaly info if available
+        hover_texts = []
+        for risk in risk_counts['Risk']:
+            risk_df = df_plot[df_plot['RiskLevel'] == risk]
+            total = len(risk_df)
+            pct = (total / len(df_plot)) * 100
+            
+            hover_text = f"<b>{risk} Risk</b><br>Total: {total} ({pct:.1f}%)<br>"
+            
+            if 'Anomaly' in df_plot.columns:
+                anomalies = (risk_df['Anomaly'] == 1).sum()
+                normal = total - anomalies
+                hover_text += f"Normal: {normal}<br>Anomalies: {anomalies}"
+            
+            hover_texts.append(hover_text)
+        
+        # Create pie chart
+        fig = go.Figure(data=[go.Pie(
+            labels=risk_counts['Risk'],
+            values=risk_counts['Count'],
+            marker=dict(colors=colors, line=dict(color='white', width=2)),
+            hole=0.4,  # Donut chart style
+            textinfo='label+percent',
+            textfont_size=13,
+            hovertemplate='%{customdata}<extra></extra>',
+            customdata=hover_texts
+        )])
+        
+        # Add center annotation with total count
+        total_events = len(df_plot)
+        fig.add_annotation(
+            text=f"<b>{total_events}</b><br>Events",
+            x=0.5, y=0.5,
+            font_size=16,
+            showarrow=False
+        )
+        
+        fig.update_layout(
+            title='Risk Severity Distribution',
+            title_font_size=18,
+            showlegend=True,
+            height=400,
+            legend=dict(
+                orientation='v',
+                yanchor='middle',
+                y=0.5,
+                xanchor='left',
+                x=1.02
+            )
+        )
+        
+        return fig
+    
+    def _map_risk_level(self, risk_score) -> str:
+        """Map risk score (1-10) to risk level"""
+        if pd.isna(risk_score):
+            return 'Low'
+        if risk_score >= 8:
+            return 'Critical'
+        elif risk_score >= 6:
+            return 'High'
+        elif risk_score >= 4:
+            return 'Medium'
+        else:
+            return 'Low'
+    
     def plot_mitre_stages(self, df: pd.DataFrame) -> go.Figure:
         """
         Create bar chart of MITRE ATT&CK stage distribution with anomaly details.
@@ -449,11 +575,24 @@ class Visualizer:
         for stage in anomalies['MITRE_Stage'].unique():
             stage_df = anomalies[anomalies['MITRE_Stage'] == stage].copy()
             
-            # Select relevant columns for display
+            # Extract EventData fields for this stage
+            stage_df = self.extract_eventdata_columns(stage_df)
+            
+            # Select columns including EventData fields - ENHANCED
+            priority_cols = [
+                'TimeCreatedISO', 'EventID', 'EventID_Name', 
+                'EventID_RiskScore', 'AnomalyScoreNormalized', 'Confidence',
+                'MITRE_Stage', 'Computer', 'User',
+                # EventData fields
+                'TargetUserName', 'SubjectUserName', 'WorkstationName',
+                'IpAddress', 'SourceAddress', 'ProcessName', 'CommandLine',
+                'ServiceName', 'LogonType', 'FailureReason', 'Status',
+                'ObjectName', 'TaskName'
+            ]
+            
             display_cols = []
-            for col in ['EventRecordID', 'TimeCreatedISO', 'EventID', 'EventID_Name', 
-                       'ClusterLabel', 'AnomalyScoreNormalized', 'Computer', 'Channel']:
-                if col in stage_df.columns:
+            for col in priority_cols:
+                if col in stage_df.columns and stage_df[col].notna().any():
                     display_cols.append(col)
             
             if display_cols:
@@ -464,3 +603,184 @@ class Visualizer:
                 stage_groups[stage] = stage_df
         
         return stage_groups
+    
+    def extract_eventdata_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extract EventData dictionary fields as separate columns with human-readable conversions.
+        
+        Args:
+            df: DataFrame with 'EventData' column
+            
+        Returns:
+            DataFrame with EventData fields as columns
+        """
+        if 'EventData' not in df.columns:
+            return df
+        
+        df_copy = df.copy()
+        
+        # Common EventData fields to extract
+        common_fields = [
+            'TargetUserName', 'SubjectUserName', 'WorkstationName',
+            'IpAddress', 'IpPort', 'SourceAddress', 'TargetDomainName',
+            'ProcessName', 'CommandLine', 'ParentProcessName',
+            'TargetServerName', 'ServiceName', 'ServiceFileName',
+            'TargetLogonId', 'LogonType', 'AuthenticationPackageName',
+            'FailureReason', 'Status', 'SubStatus',
+            'SourceNetworkAddress', 'SourcePort',
+            'ObjectName', 'ObjectType', 'AccessMask',
+            'TaskName', 'ImagePath'
+        ]
+        
+        # Extract fields from EventData dictionary
+        for field in common_fields:
+            df_copy[field] = df_copy['EventData'].apply(
+                lambda x: x.get(field) if isinstance(x, dict) else None
+            )
+        
+        # Convert technical codes to human-readable values
+        df_copy = self._convert_to_human_readable(df_copy)
+        
+        return df_copy
+    
+    def _convert_to_human_readable(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert technical codes to human-readable format"""
+        
+        # LogonType conversion
+        logon_type_map = {
+            '2': 'Interactive (Local)',
+            '3': 'Network',
+            '4': 'Batch',
+            '5': 'Service',
+            '7': 'Unlock',
+            '8': 'NetworkCleartext',
+            '9': 'NewCredentials',
+            '10': 'RemoteInteractive (RDP)',
+            '11': 'CachedInteractive',
+            2: 'Interactive (Local)',
+            3: 'Network',
+            4: 'Batch',
+            5: 'Service',
+            7: 'Unlock',
+            8: 'NetworkCleartext',
+            9: 'NewCredentials',
+            10: 'RemoteInteractive (RDP)',
+            11: 'CachedInteractive'
+        }
+        
+        if 'LogonType' in df.columns:
+            df['LogonType'] = df['LogonType'].apply(
+                lambda x: logon_type_map.get(x, x) if pd.notna(x) else x
+            )
+        
+        # Status code conversion (NTSTATUS codes)
+        status_map = {
+            '0x0': 'Success',
+            '0xc000006d': 'Bad Username',
+            '0xc000006e': 'Bad Password',
+            '0xc0000064': 'User Does Not Exist',
+            '0xc000006f': 'Logon Outside Hours',
+            '0xc0000070': 'Workstation Restriction',
+            '0xc0000071': 'Password Expired',
+            '0xc0000072': 'Account Disabled',
+            '0xc0000193': 'Account Expired',
+            '0xc0000224': 'Password Must Change',
+            '0xc0000234': 'Account Locked Out',
+            '0xc000015b': 'Logon Type Not Granted'
+        }
+        
+        if 'Status' in df.columns:
+            df['Status'] = df['Status'].apply(
+                lambda x: status_map.get(str(x).lower(), x) if pd.notna(x) else x
+            )
+        
+        if 'SubStatus' in df.columns:
+            df['SubStatus'] = df['SubStatus'].apply(
+                lambda x: status_map.get(str(x).lower(), x) if pd.notna(x) else x
+            )
+        
+        # FailureReason conversion (remove %% prefix)
+        if 'FailureReason' in df.columns:
+            failure_reason_map = {
+                '%%2305': 'Specified account does not exist',
+                '%%2309': 'Specified account is disabled',
+                '%%2310': 'Specified account has expired',
+                '%%2311': 'User not allowed to logon at this computer',
+                '%%2312': 'User not allowed to logon at this time',
+                '%%2313': 'Unknown username or bad password',
+                '%%2304': 'An Error occurred during Logon'
+            }
+            
+            df['FailureReason'] = df['FailureReason'].apply(
+                lambda x: failure_reason_map.get(str(x), str(x).replace('%%', '')) if pd.notna(x) else x
+            )
+        
+        # Process path simplification (show just filename for common paths)
+        if 'ProcessName' in df.columns:
+            df['ProcessName'] = df['ProcessName'].apply(
+                lambda x: x.split('\\')[-1] if pd.notna(x) and isinstance(x, str) and '\\' in x else x
+            )
+        
+        if 'ParentProcessName' in df.columns:
+            df['ParentProcessName'] = df['ParentProcessName'].apply(
+                lambda x: x.split('\\')[-1] if pd.notna(x) and isinstance(x, str) and '\\' in x else x
+            )
+        
+        # IP Address cleanup (remove '-' placeholders)
+        for ip_field in ['IpAddress', 'SourceAddress', 'SourceNetworkAddress']:
+            if ip_field in df.columns:
+                df[ip_field] = df[ip_field].apply(
+                    lambda x: None if x == '-' else x
+                )
+        
+        return df
+    
+    def get_enhanced_anomaly_columns(self, df: pd.DataFrame) -> list:
+        """
+        Get essential column list for anomaly display including EventData fields.
+        
+        Args:
+            df: DataFrame with anomaly data
+            
+        Returns:
+            List of column names to display
+        """
+        # Extract EventData fields first
+        df_with_eventdata = self.extract_eventdata_columns(df)
+        
+        # Essential columns in priority order
+        priority_cols = [
+            'TimeCreatedISO',
+            'EventID',
+            'EventID_Name',
+            'EventID_RiskScore',
+            'AnomalyScoreNormalized',
+            'Confidence',
+            'MITRE_Stage',
+            'Computer',
+            'User',
+            # EventData fields
+            'TargetUserName',
+            'SubjectUserName',
+            'WorkstationName',
+            'IpAddress',
+            'SourceAddress',
+            'ProcessName',
+            'CommandLine',
+            'ServiceName',
+            'LogonType',
+            'FailureReason',
+            'Status',
+            'ObjectName',
+            'TaskName'
+        ]
+        
+        # Return only columns that exist and have non-null values
+        available_cols = []
+        for col in priority_cols:
+            if col in df_with_eventdata.columns:
+                # Check if column has any non-null values
+                if df_with_eventdata[col].notna().any():
+                    available_cols.append(col)
+        
+        return available_cols

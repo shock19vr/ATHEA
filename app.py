@@ -140,6 +140,7 @@ def page_anomaly_detection():
         st.markdown("---")
         df = st.session_state.results_df
         metrics = st.session_state.training_metrics
+        viz = Visualizer()  # Initialize visualizer for enhanced columns
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -159,9 +160,41 @@ def page_anomaly_detection():
         
         anomalies = df[df['Anomaly'] == 1]
         if len(anomalies) > 0:
-            display_cols = get_display_columns(anomalies, ['EventRecordID', 'TimeCreatedISO', 'EventID', 'Computer', 'AnomalyScoreNormalized'])
+            # Extract EventData fields as columns
+            anomalies_with_eventdata = viz.extract_eventdata_columns(anomalies)
+            
+            # Use enhanced column selection for better context
+            display_cols = viz.get_enhanced_anomaly_columns(anomalies)
+            if not display_cols:
+                display_cols = get_display_columns(anomalies_with_eventdata, ['EventRecordID', 'TimeCreatedISO', 'EventID', 'Computer', 'AnomalyScoreNormalized'])
+            
             if display_cols:
-                st.dataframe(anomalies[display_cols].sort_values('AnomalyScoreNormalized', ascending=False).head(50), use_container_width=True)
+                # Rename columns for readability
+                display_df = anomalies_with_eventdata[display_cols].copy()
+                column_renames = {
+                    'TimeCreatedISO': 'Timestamp',
+                    'EventID': 'Event ID',
+                    'EventID_Name': 'Event Name',
+                    'EventID_RiskScore': 'Risk',
+                    'AnomalyScoreNormalized': 'Anomaly Score',
+                    'MITRE_Stage': 'Attack Stage',
+                    'TargetUserName': 'Target User',
+                    'SubjectUserName': 'Subject User',
+                    'WorkstationName': 'Workstation',
+                    'IpAddress': 'IP Address',
+                    'SourceAddress': 'Source IP',
+                    'ProcessName': 'Process',
+                    'CommandLine': 'Command',
+                    'ServiceName': 'Service',
+                    'LogonType': 'Logon Type',
+                    'FailureReason': 'Failure Reason',
+                    'ObjectName': 'Object',
+                    'TaskName': 'Task'
+                }
+                rename_dict = {k: v for k, v in column_renames.items() if k in display_df.columns}
+                display_df = display_df.rename(columns=rename_dict)
+                
+                st.dataframe(display_df.sort_values('Anomaly Score' if 'Anomaly Score' in display_df.columns else display_df.columns[0], ascending=False).head(50), use_container_width=True)
         
         st.markdown("---")
         if st.button("🔗 Run Clustering"):
@@ -177,21 +210,28 @@ def page_visualization():
     df = st.session_state.results_df
     viz = Visualizer()
     
+    # First row: Anomaly distribution and scores
     col1, col2 = st.columns(2)
     with col1:
         st.plotly_chart(viz.plot_anomaly_distribution(df), use_container_width=True)
     with col2:
         st.plotly_chart(viz.plot_anomaly_scores(df), use_container_width=True)
     
-    st.plotly_chart(viz.plot_timeline(df), use_container_width=True)
+    # Second row: Severity distribution and timeline
+    col3, col4 = st.columns(2)
+    with col3:
+        st.plotly_chart(viz.plot_severity_distribution(df), use_container_width=True)
+    with col4:
+        st.plotly_chart(viz.plot_timeline(df), use_container_width=True)
     
+    # Third row: Clustering and MITRE stages (if available)
     if 'ClusterLabel' in df.columns:
         st.markdown("---")
         anomalies_df = df[df['Anomaly'] == 1]
-        col1, col2 = st.columns(2)
-        with col1:
+        col5, col6 = st.columns(2)
+        with col5:
             st.plotly_chart(viz.plot_cluster_distribution(anomalies_df), use_container_width=True)
-        with col2:
+        with col6:
             if 'MITRE_Stage' in df.columns:
                 st.plotly_chart(viz.plot_mitre_stages(anomalies_df), use_container_width=True)
         
@@ -232,8 +272,38 @@ def page_visualization():
                                 avg_score = stage_df['AnomalyScoreNormalized'].mean()
                                 st.metric("Avg Anomaly Score", f"{avg_score:.2f}")
                         
-                        # Show the anomalies table
-                        st.dataframe(stage_df, use_container_width=True, height=300)
+                        # Show the anomalies table (EventData already extracted in ui_helpers)
+                        display_df = stage_df.copy()
+                        
+                        # Rename columns for better readability
+                        column_renames = {
+                            'TimeCreatedISO': 'Timestamp',
+                            'EventID': 'Event ID',
+                            'EventID_Name': 'Event Name',
+                            'EventID_RiskScore': 'Risk',
+                            'AnomalyScoreNormalized': 'Anomaly Score',
+                            'Confidence': 'Confidence',
+                            'MITRE_Stage': 'Attack Stage',
+                            'TargetUserName': 'Target User',
+                            'SubjectUserName': 'Subject User',
+                            'WorkstationName': 'Workstation',
+                            'IpAddress': 'IP Address',
+                            'SourceAddress': 'Source IP',
+                            'ProcessName': 'Process',
+                            'CommandLine': 'Command',
+                            'ServiceName': 'Service',
+                            'LogonType': 'Logon Type',
+                            'FailureReason': 'Failure Reason',
+                            'Status': 'Status',
+                            'ObjectName': 'Object',
+                            'TaskName': 'Task'
+                        }
+                        
+                        # Rename only columns that exist
+                        rename_dict = {k: v for k, v in column_renames.items() if k in display_df.columns}
+                        display_df = display_df.rename(columns=rename_dict)
+                        
+                        st.dataframe(display_df, use_container_width=True, height=300)
 
 def page_explainability():
     st.header("💡 AI-Powered Threat Intelligence")
@@ -244,6 +314,7 @@ def page_explainability():
     
     df = st.session_state.results_df
     anomalies = df[df['Anomaly'] == 1]
+    viz = Visualizer()  # Initialize visualizer for EventData extraction
     
     if len(anomalies) == 0:
         st.info("✅ No anomalies detected - your logs appear normal!")
@@ -426,12 +497,30 @@ def page_explainability():
                     st.markdown("---")
                     st.markdown("**📊 Affected Events**")
                     
-                    display_cols = ['TimeCreatedISO', 'Computer', 'User', 'AnomalyScoreNormalized']
-                    display_cols = [c for c in display_cols if c in group_anomalies.columns]
+                    # Simplified display for Explainability page - basic info only
+                    priority_cols = [
+                        'TimeCreatedISO', 'EventID', 'EventID_Name',
+                        'EventID_RiskScore', 'AnomalyScoreNormalized', 'Confidence',
+                        'Computer', 'User'
+                    ]
+                    
+                    display_cols = [c for c in priority_cols if c in group_anomalies.columns]
                     
                     if display_cols:
+                        # Rename for readability
+                        display_df = group_anomalies[display_cols].copy()
+                        column_renames = {
+                            'TimeCreatedISO': 'Timestamp',
+                            'EventID': 'Event ID',
+                            'EventID_Name': 'Event Name',
+                            'EventID_RiskScore': 'Risk',
+                            'AnomalyScoreNormalized': 'Anomaly Score'
+                        }
+                        rename_dict = {k: v for k, v in column_renames.items() if k in display_df.columns}
+                        display_df = display_df.rename(columns=rename_dict)
+                        
                         st.dataframe(
-                            group_anomalies[display_cols].sort_values('AnomalyScoreNormalized', ascending=False),
+                            display_df.sort_values('Anomaly Score' if 'Anomaly Score' in display_df.columns else display_df.columns[0], ascending=False),
                             use_container_width=True,
                             height=min(300, len(group_anomalies) * 35 + 38)
                         )
@@ -574,6 +663,56 @@ def cluster_anomalies():
         # Update results_df with cluster information
         for col in ['Cluster', 'ClusterLabel', 'MITRE_Stage']:
             st.session_state.results_df.loc[anomalies.index, col] = cluster_results[col]
+        
+        # FORCE CORRECT MITRE STAGES - Direct override approach with proper logic
+        print("\n🔧 Applying forced MITRE stage corrections...")
+        
+        if 'EventID' in st.session_state.results_df.columns:
+            # Define EventID-to-Stage mappings
+            stage_mappings = {
+                # Stage 1: Initial Access
+                'Stage 1: Initial Access': [4624, 4625, 4648, 4768, 4769, 4771, 4776, '4624', '4625', '4648', '4768', '4769', '4771', '4776'],
+                
+                # Stage 2: Execution
+                'Stage 2: Execution': [4688, 1, 4689, '4688', '1', '4689'],
+                
+                # Stage 3: Persistence
+                'Stage 3: Persistence': [4698, 4699, 4700, 4701, 7045, 7040, '4698', '4699', '4700', '4701', '7045', '7040'],
+                
+                # Stage 3: Defense Evasion
+                'Stage 3: Defense Evasion': [4657, 4663, 4670, 1102, '4657', '4663', '4670', '1102'],
+                
+                # Stage 4: Credential Access
+                'Stage 4: Credential Access': [4656, 4661, 4662, '4656', '4661', '4662'],
+                
+                # Stage 5: Lateral Movement
+                'Stage 5: Lateral Movement': [4672, 4778, 4779, 5140, 5145, '4672', '4778', '4779', '5140', '5145'],
+            }
+            
+            # Apply mappings
+            for stage, event_ids in stage_mappings.items():
+                mask = st.session_state.results_df['EventID'].isin(event_ids)
+                count = mask.sum()
+                if count > 0:
+                    st.session_state.results_df.loc[mask, 'MITRE_Stage'] = stage
+                    print(f"   ✅ Forced {count} events to {stage}")
+        
+        # Additional check: Events with CommandLine but NOT logon events should be Execution
+        if 'CommandLine' in st.session_state.results_df.columns and 'EventID' in st.session_state.results_df.columns:
+            has_command = (st.session_state.results_df['CommandLine'].notna() & 
+                          (st.session_state.results_df['CommandLine'] != '') &
+                          ~st.session_state.results_df['EventID'].isin([4624, 4625, 4648, '4624', '4625', '4648']))
+            command_count = has_command.sum()
+            if command_count > 0:
+                st.session_state.results_df.loc[has_command, 'MITRE_Stage'] = 'Stage 2: Execution'
+                print(f"   ✅ Forced {command_count} events with CommandLine to Stage 2: Execution")
+        
+        # Print final stage distribution
+        print("\n📊 Final MITRE Stage Distribution:")
+        stage_dist = st.session_state.results_df[st.session_state.results_df['Anomaly'] == 1]['MITRE_Stage'].value_counts()
+        for stage, count in stage_dist.items():
+            print(f"   {stage}: {count} anomalies")
+        print()
         
         st.success(f"✅ Clustered into {cluster_results['Cluster'].nunique()} groups")
 
