@@ -1,0 +1,15 @@
+# Flask specific
+uploads/*
+!uploads/.gitkeep
+results/*
+!results/.gitkeep
+*.pyc
+__pycache__/
+instance/
+.env
+
+# Flask session
+flask_session/
+
+# Logs
+*.log

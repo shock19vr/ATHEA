@@ -306,7 +306,7 @@ def page_visualization():
                         st.dataframe(display_df, use_container_width=True, height=300)
 
 def page_explainability():
-    st.header("💡 AI-Powered Threat Intelligence")
+    st.header("💡 Explainable AI & Threat Intelligence")
     
     if st.session_state.results_df is None or st.session_state.model is None:
         st.warning("⚠️ Please run anomaly detection first.")
@@ -322,41 +322,243 @@ def page_explainability():
     
     # Compute SHAP values automatically on first load if not already computed
     if st.session_state.explainer is None:
-        with st.spinner("🧠 Computing AI explanations..."):
+        with st.spinner("🧠 Computing XAI explanations..."):
             compute_shap_values()
     
     if st.session_state.explainer is not None:
-        # Generate global AI analysis first
-        with st.spinner("🤖 Generating comprehensive threat analysis..."):
-            global_analysis = st.session_state.explainer.generate_global_genai_analysis(df)
+        # Create tabs for XAI and Gemini sections
+        tab1, tab2 = st.tabs(["🔬 XAI Analysis (SHAP)", "🤖 Gemini AI Analysis"])
         
-        # Display global analysis
-        st.markdown("### 🌐 Overall Threat Landscape")
+        # ========================================
+        # TAB 1: XAI ANALYSIS (SHAP-BASED)
+        # ========================================
+        with tab1:
+            st.markdown("### 🔬 Explainable AI - Model Reasoning")
+            st.markdown("*Understanding why the ML model flagged events as anomalous using SHAP (SHapley Additive exPlanations)*")
+            st.markdown("---")
+            
+            # Global Feature Importance
+            st.markdown("#### 📊 Global Feature Importance")
+            st.markdown("*Which features matter most across all anomalies?*")
+            
+            try:
+                importance_df = st.session_state.explainer.get_feature_importance()
+                
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    # Bar chart of top features
+                    import plotly.graph_objects as go
+                    top_n = min(15, len(importance_df))
+                    top_features = importance_df.head(top_n)
+                    
+                    fig = go.Figure(go.Bar(
+                        x=top_features['Importance'],
+                        y=top_features['Feature'],
+                        orientation='h',
+                        marker=dict(
+                            color=top_features['Importance'],
+                            colorscale='Reds',
+                            showscale=True,
+                            colorbar=dict(title="SHAP Impact")
+                        )
+                    ))
+                    fig.update_layout(
+                        title=f"Top {top_n} Most Important Features",
+                        xaxis_title="Mean |SHAP Value|",
+                        yaxis_title="Feature",
+                        height=500,
+                        yaxis={'categoryorder': 'total ascending'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    st.markdown("**📈 Feature Statistics**")
+                    st.dataframe(
+                        importance_df.head(10).style.format({'Importance': '{:.4f}'}),
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    st.info(f"💡 **Insight**: The top feature '{importance_df.iloc[0]['Feature']}' has the highest impact on anomaly detection across all events.")
+            
+            except Exception as e:
+                st.error(f"Error computing feature importance: {e}")
+            
+            st.markdown("---")
+            
+            # Individual Anomaly Explanations
+            st.markdown("#### 🔍 Individual Anomaly Explanations")
+            st.markdown("*Detailed SHAP-based reasoning for each anomaly*")
+            
+            # Select anomaly to explain
+            anomaly_indices = anomalies.index.tolist()
+            
+            # Create selection options with context
+            selection_options = []
+            for idx in anomaly_indices[:50]:  # Limit to top 50 for performance
+                event_id = df.loc[idx, 'EventID'] if 'EventID' in df.columns else 'N/A'
+                score = df.loc[idx, 'AnomalyScoreNormalized'] if 'AnomalyScoreNormalized' in df.columns else 0
+                timestamp = df.loc[idx, 'TimeCreatedISO'] if 'TimeCreatedISO' in df.columns else 'N/A'
+                selection_options.append(f"Index {idx} | EventID {event_id} | Score: {score:.2%} | {timestamp}")
+            
+            selected_option = st.selectbox(
+                "Select an anomaly to explain:",
+                selection_options,
+                help="Choose an anomaly to see detailed SHAP-based explanation"
+            )
+            
+            if selected_option:
+                selected_idx = int(selected_option.split('|')[0].replace('Index', '').strip())
+                
+                try:
+                    # Generate explanation
+                    explanation = st.session_state.explainer.explain_sample(
+                        selected_idx,
+                        st.session_state.features_df,
+                        top_n=10
+                    )
+                    
+                    # Display explanation
+                    col1, col2 = st.columns([3, 2])
+                    
+                    with col1:
+                        st.markdown("##### 🎯 Top Contributing Features")
+                        
+                        # Create waterfall-style visualization
+                        top_features = explanation['top_features']
+                        
+                        for i, feat in enumerate(top_features[:8], 1):
+                            feature_name = feat['feature']
+                            shap_val = feat['shap_value']
+                            feature_val = feat['value']
+                            contribution = feat['contribution']
+                            
+                            # Color based on contribution
+                            if contribution == "increases":
+                                color = "🔴"
+                                bar_color = "#ff4444"
+                            else:
+                                color = "🟢"
+                                bar_color = "#44ff44"
+                            
+                            # Create progress bar for SHAP value
+                            abs_shap = abs(shap_val)
+                            max_shap = max([abs(f['shap_value']) for f in top_features])
+                            bar_width = int((abs_shap / max_shap) * 100) if max_shap > 0 else 0
+                            
+                            st.markdown(f"""
+                            **{i}. {feature_name}** {color}
+                            - Feature Value: `{feature_val:.4f}`
+                            - SHAP Value: `{shap_val:.4f}` ({contribution} anomaly score)
+                            - Impact: {'█' * (bar_width // 5)}
+                            """)
+                        
+                        st.markdown("---")
+                        st.markdown("##### 📝 Natural Language Explanation")
+                        st.info(explanation['explanation_text'])
+                    
+                    with col2:
+                        st.markdown("##### 📊 Event Details")
+                        
+                        event = df.loc[selected_idx]
+                        
+                        # Display key event information
+                        if 'EventID' in df.columns:
+                            st.metric("Event ID", event.get('EventID', 'N/A'))
+                        if 'AnomalyScoreNormalized' in df.columns:
+                            st.metric("Anomaly Score", f"{event.get('AnomalyScoreNormalized', 0):.2%}")
+                        if 'Computer' in df.columns:
+                            st.metric("Computer", event.get('Computer', 'N/A'))
+                        if 'User' in df.columns:
+                            st.metric("User", event.get('User', 'N/A'))
+                        
+                        st.markdown("---")
+                        st.markdown("##### 🧮 SHAP Interpretation")
+                        st.markdown("""
+                        **How to read SHAP values:**
+                        - 🔴 **Positive SHAP**: Feature pushes prediction towards anomaly
+                        - 🟢 **Negative SHAP**: Feature pushes prediction towards normal
+                        - **Magnitude**: Larger absolute value = stronger impact
+                        """)
+                        
+                        # Base value info
+                        if 'base_value' in explanation:
+                            st.markdown(f"**Base Value**: {explanation['base_value']:.4f}")
+                            st.caption("The average model output across all training data")
+                
+                except Exception as e:
+                    st.error(f"Error generating explanation: {e}")
+            
+            st.markdown("---")
+            
+            # Export explanations
+            st.markdown("#### 💾 Export XAI Explanations")
+            
+            if st.button("📥 Generate Explanation Report for All Anomalies"):
+                with st.spinner("Generating explanations for all anomalies..."):
+                    try:
+                        explanations_df = st.session_state.explainer.export_explanations(
+                            st.session_state.features_df,
+                            anomaly_indices[:100],  # Limit to 100 for performance
+                            top_n=5
+                        )
+                        
+                        st.success(f"✅ Generated explanations for {len(explanations_df)} anomalies")
+                        st.dataframe(explanations_df, use_container_width=True, height=300)
+                        
+                        # Download button
+                        csv = explanations_df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Explanations CSV",
+                            data=csv,
+                            file_name="xai_explanations.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"Error exporting explanations: {e}")
         
-        if 'error' not in global_analysis:
-            col1, col2 = st.columns([2, 1])
+        # ========================================
+        # TAB 2: GEMINI AI ANALYSIS
+        # ========================================
+        with tab2:
+            st.markdown("### 🤖 Gemini AI - Strategic Threat Analysis")
+            st.markdown("*AI-powered contextual analysis and strategic recommendations*")
+            st.markdown("---")
             
-            with col1:
-                with st.expander("📊 Overview", expanded=True):
-                    st.markdown(global_analysis.get('overview', 'No overview available'))
+            # Generate global AI analysis
+            with st.spinner("🤖 Generating comprehensive threat analysis..."):
+                global_analysis = st.session_state.explainer.generate_global_genai_analysis(df)
+            
+            # Display global analysis
+            st.markdown("#### 🌐 Overall Threat Landscape")
+            
+            if 'error' not in global_analysis:
+                col1, col2 = st.columns([2, 1])
                 
-                with st.expander("🎯 Attack Patterns", expanded=True):
-                    st.markdown(global_analysis.get('patterns', 'No patterns identified'))
-            
-            with col2:
-                with st.expander("⚠️ Threat Assessment", expanded=True):
-                    st.markdown(global_analysis.get('threat_assessment', 'No assessment available'))
+                with col1:
+                    with st.expander("📊 Overview", expanded=True):
+                        st.markdown(global_analysis.get('overview', 'No overview available'))
+                    
+                    with st.expander("🎯 Attack Patterns", expanded=True):
+                        st.markdown(global_analysis.get('patterns', 'No patterns identified'))
                 
-                with st.expander("💡 Key Takeaways", expanded=True):
-                    st.markdown(global_analysis.get('key_takeaways', 'No takeaways available'))
+                with col2:
+                    with st.expander("⚠️ Threat Assessment", expanded=True):
+                        st.markdown(global_analysis.get('threat_assessment', 'No assessment available'))
+                    
+                    with st.expander("💡 Key Takeaways", expanded=True):
+                        st.markdown(global_analysis.get('key_takeaways', 'No takeaways available'))
+                
+                with st.expander("🛡️ Strategic Recommendations", expanded=False):
+                    st.markdown(global_analysis.get('recommendations', 'No recommendations available'))
+            else:
+                st.warning("⚠️ Global AI analysis unavailable. Configure Gemini API key in sidebar.")
             
-            with st.expander("🛡️ Strategic Recommendations", expanded=False):
-                st.markdown(global_analysis.get('recommendations', 'No recommendations available'))
-        else:
-            st.warning("⚠️ Global AI analysis unavailable. Configure Gemini API key in sidebar.")
+            st.markdown("---")
         
         st.markdown("---")
-        # Group anomalies by EventID
+        # Group anomalies by EventID (shared across both tabs)
         st.markdown("### 🔍 Anomaly Groups by Event Type")
         
         if 'EventID' in anomalies.columns:
@@ -435,7 +637,7 @@ def page_explainability():
                 # Create expander for this group
                 with st.expander(
                     f"{risk_badge} **EventID {event_id}** - {count} occurrence(s) | Max Risk: {max_score:.1%}",
-                    expanded=(max_score > 0.7)
+                    expanded=bool(max_score > 0.7)
                 ):
                     # Group metrics
                     gcol1, gcol2, gcol3, gcol4 = st.columns(4)
@@ -449,49 +651,6 @@ def page_explainability():
                         st.metric("Unique Users", int(row['UniqueUsers']))
                     
                     st.markdown("---")
-                    
-                    # Get representative anomaly (highest score)
-                    representative_idx = group_anomalies['AnomalyScoreNormalized'].idxmax()
-                    
-                    # Generate AI analysis for this group
-                    explanation = st.session_state.explainer.explain_sample(
-                        representative_idx,
-                        st.session_state.results_df,
-                        top_n=5
-                    )
-                    
-                    timeline_data = st.session_state.explainer.get_event_timeline(
-                        representative_idx,
-                        st.session_state.results_df,
-                        window_minutes=10
-                    )
-                    
-                    genai_analysis = st.session_state.explainer.generate_genai_analysis(
-                        representative_idx,
-                        st.session_state.results_df,
-                        explanation,
-                        timeline_data=timeline_data
-                    )
-                    
-                    # Display AI analysis
-                    if 'error' not in genai_analysis:
-                        acol1, acol2 = st.columns([3, 2])
-                        
-                        with acol1:
-                            st.markdown("**📝 Summary**")
-                            st.info(genai_analysis.get('summary', 'No summary available'))
-                            
-                            st.markdown("**🔍 What Happened**")
-                            st.markdown(genai_analysis.get('what_happened', 'No analysis available'))
-                        
-                        with acol2:
-                            st.markdown("**💡 Key Takeaways**")
-                            st.markdown(genai_analysis.get('key_takeaways', 'No takeaways available'))
-                            
-                            st.markdown("**🛡️ Recommendations**")
-                            st.markdown(genai_analysis.get('recommendations', 'No recommendations available'))
-                    else:
-                        st.warning("⚠️ AI analysis unavailable for this group")
                     
                     # Show affected events table
                     st.markdown("---")

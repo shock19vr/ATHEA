@@ -40,9 +40,13 @@ class GeminiAnalyzer:
         # Configure Gemini
         genai.configure(api_key=self.api_key)
         
-        # Initialize model - using gemini-2.0-flash-exp as it's the latest
-        # If you specifically want 2.5, use 'gemini-2.5-flash' when available
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        # Initialize model - using gemini-1.5-flash (stable and available)
+        # Alternative: 'gemini-1.5-pro' for more advanced analysis
+        try:
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
+        except Exception as e:
+            print(f"⚠️ Failed to initialize gemini-2.5-flash, trying gemini-pro: {e}")
+            self.model = genai.GenerativeModel('gemini-2.5-pro')
         
         # Generation config for consistent output
         self.generation_config = {

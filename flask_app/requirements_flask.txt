@@ -1,0 +1,16 @@
+# Flask Application Requirements
+Flask>=3.0.0
+Werkzeug>=3.0.0
+
+# All dependencies from parent project
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+shap>=0.42.0
+google-generativeai>=0.3.0
+plotly>=5.17.0
+python-evtx>=0.8.1
+joblib>=1.3.0
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+lxml>=4.9.0
