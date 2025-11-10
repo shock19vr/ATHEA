@@ -2,15 +2,25 @@
 Flask>=3.0.0
 Werkzeug>=3.0.0
 
-# All dependencies from parent project
+# Core dependencies from parent project
 pandas>=2.0.0
 numpy>=1.24.0
+
+# Machine Learning
 scikit-learn>=1.3.0
+
+# Explainable AI
 shap>=0.42.0
 google-generativeai>=0.3.0
+
+# Visualization
 plotly>=5.17.0
+
+# Log parsing
 python-evtx>=0.8.1
+lxml>=4.9.0
+
+# Utilities
 joblib>=1.3.0
 tqdm>=4.66.0
 python-dotenv>=1.0.0
-lxml>=4.9.0

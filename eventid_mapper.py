@@ -2,34 +2,27 @@
 EventID Mapper - Correlation Engine
 Integrates all EventID reference databases to provide knowledge-based threat detection.
 Maps EventIDs to risk scores, MITRE tactics, and attack patterns.
+Now uses SQLite database for all reference data.
 """
 
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
-from eventid_reference_security import SECURITY_EVENTS, get_event_info as get_security_info
-from eventid_reference_sysmon import SYSMON_EVENTS, get_sysmon_event_info
-from eventid_reference_system import SYSTEM_EVENTS, get_system_event_info
-from mitre_ttps_reference import MITRE_TACTICS, get_all_techniques_for_tactic, get_technique_name
+from db_manager import get_db_manager
 
 
 class EventIDMapper:
-    """Knowledge-based EventID correlation engine"""
+    """Knowledge-based EventID correlation engine using database"""
     
-    def __init__(self):
-        self.security_db = SECURITY_EVENTS
-        self.sysmon_db = SYSMON_EVENTS
-        self.system_db = SYSTEM_EVENTS
+    def __init__(self, db_path: str = "event_references.db"):
+        self.db = get_db_manager(db_path)
         
-        # Combined database for quick lookups
-        self.all_events = {
-            **{f"Security_{k}": v for k, v in self.security_db.items()},
-            **{f"Sysmon_{k}": v for k, v in self.sysmon_db.items()},
-            **{f"System_{k}": v for k, v in self.system_db.items()}
-        }
+        # Cache for frequently accessed data
+        self._tactic_cache = {}
+        self._technique_cache = {}
     
     def get_event_intelligence(self, event_id: int, channel: str = None) -> Dict:
         """
-        Get comprehensive intelligence for an EventID.
+        Get comprehensive intelligence for an EventID from database.
         
         Args:
             event_id: The EventID to look up
@@ -38,26 +31,40 @@ class EventIDMapper:
         Returns:
             Dictionary with all available intelligence
         """
-        # Auto-detect channel if not provided
-        if channel is None:
-            channel = self._detect_channel(event_id)
+        # Get event from database
+        info = self.db.get_event_by_id_and_channel(event_id, channel)
         
-        # Get event info from appropriate database
-        if "sysmon" in channel.lower() or "operational" in channel.lower():
-            info = get_sysmon_event_info(event_id)
-            info['source'] = 'Sysmon'
-        elif "security" in channel.lower():
-            info = get_security_info(event_id)
-            info['source'] = 'Security'
-        elif "system" in channel.lower() or "task" in channel.lower() or "powershell" in channel.lower():
-            info = get_system_event_info(event_id)
-            info['source'] = 'System'
+        if info:
+            # Determine source if not already set
+            if 'source' not in info:
+                if channel:
+                    channel_lower = channel.lower()
+                    if "sysmon" in channel_lower or "operational" in channel_lower:
+                        info['source'] = 'Sysmon'
+                    elif "security" in channel_lower:
+                        info['source'] = 'Security'
+                    elif "system" in channel_lower or "task" in channel_lower or "powershell" in channel_lower:
+                        info['source'] = 'System'
+                    else:
+                        info['source'] = 'Unknown'
+                else:
+                    info['source'] = self._detect_channel(event_id)
         else:
-            # Unknown channel, try all databases
-            info = self._search_all_databases(event_id)
-            info['source'] = 'Unknown'
+            # Event not found in database
+            info = {
+                "event_id": event_id,
+                "name": f"Unknown Event {event_id}",
+                "category": "Unknown",
+                "risk_score": 5,
+                "mitre_tactics": [],
+                "mitre_techniques": [],
+                "description": "Event not in reference database",
+                "suspicious_when": [],
+                "severity": "Unknown",
+                "source": "Unknown"
+            }
         
-        # Enrich with EventID
+        # Ensure event_id is set
         info['event_id'] = event_id
         
         return info
@@ -104,7 +111,7 @@ class EventIDMapper:
     
     def get_mitre_mapping(self, event_id: int, channel: str = None) -> Dict:
         """
-        Get MITRE ATT&CK mapping for an EventID.
+        Get MITRE ATT&CK mapping for an EventID from database.
         
         Returns:
             Dictionary with tactics, techniques, and all related TTPs
@@ -113,17 +120,28 @@ class EventIDMapper:
         event_tactics = info.get('mitre_tactics', [])
         event_techniques = info.get('mitre_techniques', [])
         
-        # Get all techniques for each tactic
+        # Get all techniques for each tactic from database
         all_techniques_by_tactic = {}
         for tactic in event_tactics:
-            all_techniques_by_tactic[tactic] = get_all_techniques_for_tactic(tactic)
+            if tactic not in self._tactic_cache:
+                techniques = self.db.get_techniques_for_tactic(tactic)
+                self._tactic_cache[tactic] = {t['technique_id']: t['technique_name'] for t in techniques}
+            all_techniques_by_tactic[tactic] = self._tactic_cache[tactic]
+        
+        # Get technique names from database
+        technique_names = []
+        for tech_id in event_techniques:
+            if tech_id not in self._technique_cache:
+                tech = self.db.get_technique_by_id(tech_id)
+                self._technique_cache[tech_id] = tech['technique_name'] if tech else f"Unknown ({tech_id})"
+            technique_names.append(self._technique_cache[tech_id])
         
         return {
             'tactics': event_tactics,
             'techniques': event_techniques,
             'primary_tactic': event_tactics[0] if event_tactics else 'Execution',
             'all_techniques_by_tactic': all_techniques_by_tactic,
-            'technique_names': [get_technique_name(t) for t in event_techniques]
+            'technique_names': technique_names
         }
     
     def is_suspicious(self, event_id: int, channel: str = None, 
@@ -267,13 +285,16 @@ class EventIDMapper:
         return tactic_to_stage.get(primary_tactic, 'Stage 2: Execution')
     
     def _detect_channel(self, event_id: int) -> str:
-        """Auto-detect channel based on EventID"""
-        if event_id in self.sysmon_db:
+        """Auto-detect channel based on EventID by checking database"""
+        # Try to find in each table
+        if self.db.get_sysmon_event(event_id):
             return "Sysmon"
-        elif event_id in self.security_db:
+        elif self.db.get_security_event(event_id):
             return "Security"
-        elif event_id in self.system_db:
+        elif self.db.get_system_event(event_id):
             return "System"
+        elif self.db.get_sql_event(event_id):
+            return "SQL"
         else:
             # Make educated guess based on common ranges
             if event_id >= 4600 and event_id < 6000:
@@ -283,52 +304,27 @@ class EventIDMapper:
             else:
                 return "System"
     
-    def _search_all_databases(self, event_id: int) -> Dict:
-        """Search all databases for an EventID"""
-        # Try Sysmon first
-        if event_id in self.sysmon_db:
-            return get_sysmon_event_info(event_id)
-        
-        # Try Security
-        if event_id in self.security_db:
-            return get_security_info(event_id)
-        
-        # Try System
-        if event_id in self.system_db:
-            return get_system_event_info(event_id)
-        
-        # Not found
-        return {
-            "name": f"Unknown Event {event_id}",
-            "category": "Unknown",
-            "risk_score": 5,
-            "mitre_tactics": [],
-            "mitre_techniques": [],
-            "description": "Event not in reference database",
-            "suspicious_when": [],
-            "severity": "Unknown"
-        }
-    
     def get_statistics(self) -> Dict:
-        """Get statistics about the reference databases"""
-        return {
-            'total_events': len(self.security_db) + len(self.sysmon_db) + len(self.system_db),
-            'security_events': len(self.security_db),
-            'sysmon_events': len(self.sysmon_db),
-            'system_events': len(self.system_db),
-            'high_risk_events': sum(1 for info in {**self.security_db, **self.sysmon_db, **self.system_db}.values() 
-                                   if info.get('risk_score', 0) >= 7),
-            'critical_severity': sum(1 for info in {**self.security_db, **self.sysmon_db, **self.system_db}.values() 
-                                    if info.get('severity') == 'Critical')
-        }
+        """Get statistics about the reference databases from database"""
+        stats = self.db.get_statistics()
+        
+        # Add high risk count
+        high_risk_events = self.db.search_events_by_risk(min_risk=7)
+        stats['high_risk_events'] = len(high_risk_events)
+        
+        # Add critical severity count
+        critical_events = self.db.search_events_by_risk(min_risk=9)
+        stats['critical_severity'] = len(critical_events)
+        
+        return stats
 
 
 # Global instance
 _mapper = None
 
-def get_mapper() -> EventIDMapper:
+def get_mapper(db_path: str = "event_references.db") -> EventIDMapper:
     """Get singleton EventIDMapper instance"""
     global _mapper
     if _mapper is None:
-        _mapper = EventIDMapper()
+        _mapper = EventIDMapper(db_path)
     return _mapper

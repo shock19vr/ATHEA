@@ -1,6 +1,7 @@
 """
 Flask Application for XAI EVTX Anomaly Detection
 One-click pipeline execution with modern UI
+Now with SQLite database integration
 """
 
 import os
@@ -24,6 +25,7 @@ from parser import LogParser
 from features import FeatureEngineer
 from model import AnomalyDetector, AnomalyClusterer
 from explain import AnomalyExplainer
+from db_manager import get_db_manager
 
 app = Flask(__name__)
 app.secret_key = 'xai-evtx-anomaly-detection-secret-key-2024'
@@ -33,6 +35,20 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {'evtx', 'csv', 'json', 'log', 'txt'}
+
+# Get database manager instance (database should already exist)
+db_path = str(Path(__file__).parent.parent / "event_references.db")
+if not Path(db_path).exists():
+    print("❌ ERROR: Database not found!")
+    print(f"   Expected: {db_path}")
+    print("   Please run: python init_database.py")
+    print("   Or run the Streamlit app first to initialize the database.")
+    sys.exit(1)
+
+print(f"✅ Using database: {db_path}")
+db = get_db_manager(db_path)
+stats = db.get_statistics()
+print(f"📊 Database loaded: {stats['total_events']} events, {stats['mitre_tactics']} tactics, {stats['mitre_techniques']} techniques")
 
 # Global storage for pipeline state
 pipeline_state = {}
@@ -78,6 +94,31 @@ def clear_pipeline_state():
     session_id = get_session_id()
     if session_id in pipeline_state:
         del pipeline_state[session_id]
+
+
+def save_results_to_database(results_df: pd.DataFrame, session_id: str):
+    """Save analysis results to database"""
+    try:
+        # Save only anomalies to database
+        anomalies = results_df[results_df['Anomaly'] == 1]
+        
+        for idx, row in anomalies.iterrows():
+            result_data = {
+                'event_record_id': row.get('EventRecordID'),
+                'event_id': row.get('EventID'),
+                'computer': row.get('Computer'),
+                'timestamp': row.get('TimeCreatedISO'),
+                'anomaly': 1,
+                'anomaly_score': row.get('AnomalyScoreNormalized', 0.0),
+                'cluster_label': row.get('ClusterLabel'),
+                'mitre_stage': row.get('MITRE_Stage'),
+                'confidence': row.get('Confidence', 0.0)
+            }
+            db.insert_analysis_result(session_id, result_data)
+        
+        print(f"💾 Saved {len(anomalies)} anomalies to database (Session: {session_id[:8]}...)")
+    except Exception as e:
+        print(f"⚠️ Error saving results to database: {e}")
 
 
 @app.route('/')
@@ -265,6 +306,9 @@ def run_pipeline():
         session_id = get_session_id()
         results_path = os.path.join(app.config['RESULTS_FOLDER'], f'{session_id}_results.csv')
         results_df.to_csv(results_path, index=False)
+        
+        # Save anomalies to database
+        save_results_to_database(results_df, session_id)
         
         # Complete
         state['status'] = 'completed'
