@@ -358,7 +358,7 @@ class LogParser:
             dt = self._parse_time(timestamp_field)
             
             if dt is not None:
-                e['TimeCreatedISO'] = dt.astimezone(timezone.utc).isoformat()
+                e['TimeCreatedISO'] = dt.isoformat()
                 e['Year'] = dt.year
                 e['Month'] = dt.month
                 e['Day'] = dt.day
@@ -399,23 +399,32 @@ class LogParser:
             return None
     
     def _parse_time(self, ts) -> Optional[datetime]:
-        """Parse various timestamp formats"""
+        """
+        Parse various timestamp formats while preserving timezone information.
+        Returns timezone-aware datetime when possible.
+        """
         if not ts:
             return None
         
         try:
-            # ISO format with Z
+            # ISO format with Z (UTC)
             if isinstance(ts, str) and ts.endswith('Z'):
-                ts = ts[:-1]
-                dt = datetime.fromisoformat(ts)
+                ts_clean = ts[:-1]
+                dt = datetime.fromisoformat(ts_clean)
                 return dt.replace(tzinfo=timezone.utc)
             
-            # ISO format
-            return datetime.fromisoformat(str(ts))
+            # ISO format with timezone offset (e.g., +05:30, -08:00)
+            # datetime.fromisoformat handles this automatically in Python 3.7+
+            if isinstance(ts, str):
+                dt = datetime.fromisoformat(str(ts))
+                # If no timezone info, assume UTC for consistency
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
         except Exception:
             pass
         
-        # Try common formats
+        # Try common formats (these will be timezone-naive, so we'll assume UTC)
         formats = [
             '%Y-%m-%d %H:%M:%S',
             '%Y/%m/%d %H:%M:%S',
@@ -425,7 +434,9 @@ class LogParser:
         
         for fmt in formats:
             try:
-                return datetime.strptime(str(ts), fmt)
+                dt = datetime.strptime(str(ts), fmt)
+                # Assume UTC for timezone-naive timestamps
+                return dt.replace(tzinfo=timezone.utc)
             except Exception:
                 continue
         
