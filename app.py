@@ -68,8 +68,8 @@ for key in ['parsed_data', 'features_df', 'results_df', 'model', 'explainer', 'f
             st.session_state[key] = None
 
 def main():
-    st.markdown('<div class="main-header">🛡️ Explainable Log Anomaly Detection System</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">XAI-based APT Detector for Security Logs</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🛡️ATHEA</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Automated Threat Hunting using Explainable AI</div>', unsafe_allow_html=True)
     
     with st.sidebar:
         st.title("Navigation")
