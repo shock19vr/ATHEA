@@ -196,7 +196,7 @@ async function displayResults() {
 
         // Load XAI data
         await loadFeatureImportance();
-        populateAnomalySelector(data.top_anomalies);
+        populateAnomalySelector(data.all_anomalies || data.top_anomalies);
 
         // Load Gemini AI analysis
         await loadGeminiAnalysis();
@@ -236,12 +236,19 @@ function displayAnomalies(anomalies) {
     anomalies.forEach(anomaly => {
         const row = document.createElement('tr');
         
+        // Get score value with proper handling
+        const score = anomaly.score !== undefined ? anomaly.score : 0;
+        
+        // Calculate risk level based on score (matching summary chart thresholds)
         let riskClass = 'risk-low';
         let riskLabel = 'LOW';
-        if (anomaly.score > 0.8) {
+        if (score > 0.8) {
+            riskClass = 'risk-critical';
+            riskLabel = 'CRITICAL';
+        } else if (score > 0.6) {
             riskClass = 'risk-high';
             riskLabel = 'HIGH';
-        } else if (anomaly.score > 0.5) {
+        } else if (score > 0.4) {
             riskClass = 'risk-medium';
             riskLabel = 'MEDIUM';
         }
@@ -249,10 +256,10 @@ function displayAnomalies(anomalies) {
         row.innerHTML = `
             <td><span class="risk-badge ${riskClass}">${riskLabel}</span></td>
             <td>${anomaly.event_id || 'N/A'}</td>
-            <td>${(anomaly.score * 100).toFixed(1)}%</td>
-            <td>${anomaly.timestamp}</td>
-            <td>${anomaly.computer}</td>
-            <td>${anomaly.user}</td>
+            <td>${(score * 100).toFixed(1)}%</td>
+            <td>${anomaly.timestamp || 'N/A'}</td>
+            <td>${anomaly.computer || 'N/A'}</td>
+            <td>${anomaly.user || 'N/A'}</td>
             <td>
                 <button class="btn btn-primary" style="padding: 5px 15px; font-size: 0.9rem;" 
                         onclick="explainAnomalyById(${anomaly.index})">
@@ -274,15 +281,27 @@ function displayDetailedAnomalies(anomalies) {
 
     tbody.innerHTML = '';
     
+    // Debug: Log first anomaly to see data structure
+    if (anomalies.length > 0) {
+        console.log('Sample anomaly data:', anomalies[0]);
+    }
+    
     anomalies.forEach(anomaly => {
         const row = document.createElement('tr');
         
+        // Get score value - handle both 'score' and potential other field names
+        const score = anomaly.score !== undefined ? anomaly.score : 0;
+        
+        // Calculate risk level based on score (matching summary chart thresholds)
         let riskClass = 'risk-low';
         let riskLabel = 'LOW';
-        if (anomaly.score > 0.8) {
-            riskClass = 'risk-high';
+        if (score > 0.8) {
+            riskClass = 'risk-critical';
             riskLabel = 'CRITICAL';
-        } else if (anomaly.score > 0.5) {
+        } else if (score > 0.6) {
+            riskClass = 'risk-high';
+            riskLabel = 'HIGH';
+        } else if (score > 0.4) {
             riskClass = 'risk-medium';
             riskLabel = 'MEDIUM';
         }
@@ -290,11 +309,11 @@ function displayDetailedAnomalies(anomalies) {
         row.innerHTML = `
             <td><span class="risk-badge ${riskClass}">${riskLabel}</span></td>
             <td>${anomaly.event_id || 'N/A'}</td>
-            <td>${(anomaly.score * 100).toFixed(1)}%</td>
-            <td>${anomaly.timestamp}</td>
-            <td>${anomaly.computer}</td>
-            <td>${anomaly.user}</td>
-            <td>${anomaly.index}</td>
+            <td>${(score * 100).toFixed(1)}%</td>
+            <td>${anomaly.timestamp || 'N/A'}</td>
+            <td>${anomaly.computer || 'N/A'}</td>
+            <td>${anomaly.user || 'N/A'}</td>
+            <td>${anomaly.index !== undefined ? anomaly.index : 'N/A'}</td>
             <td>
                 <button class="btn btn-primary" style="padding: 5px 15px; font-size: 0.9rem;" 
                         onclick="explainAnomalyById(${anomaly.index})">
@@ -706,7 +725,7 @@ function destroyChart(chartId) {
 }
 
 // Main function to display all charts
-function displayCharts(anomalies, summary) {
+async function displayCharts(anomalies, summary) {
     if (!anomalies || anomalies.length === 0) return;
 
     // Destroy existing charts
@@ -716,10 +735,12 @@ function displayCharts(anomalies, summary) {
     createRiskPieChart(anomalies);
     createAnomalyDoughnutChart(summary);
     createComputerBarChart(anomalies);
-    createUserBarChart(anomalies);
     createEventIdBarChart(anomalies);
     createTimelineChart(anomalies);
     createScoreHistogramChart(anomalies);
+    
+    // Load and display cluster/MITRE charts if available
+    await loadClusterMitreCharts();
 }
 
 // 1. Risk Distribution Pie Chart
@@ -727,12 +748,13 @@ function createRiskPieChart(anomalies) {
     const ctx = document.getElementById('riskPieChart');
     if (!ctx) return;
 
-    // Count risk levels
+    // Count risk levels based on anomaly scores
     let critical = 0, high = 0, medium = 0, low = 0;
     anomalies.forEach(a => {
-        if (a.score > 0.8) critical++;
-        else if (a.score > 0.6) high++;
-        else if (a.score > 0.4) medium++;
+        const score = a.score || 0;
+        if (score > 0.8) critical++;
+        else if (score > 0.6) high++;
+        else if (score > 0.4) medium++;
         else low++;
     });
 
@@ -743,7 +765,7 @@ function createRiskPieChart(anomalies) {
             labels: ['Critical (>80%)', 'High (60-80%)', 'Medium (40-60%)', 'Low (<40%)'],
             datasets: [{
                 data: [critical, high, medium, low],
-                backgroundColor: ['#ef4444', '#f59e0b', '#eab308', '#10b981'],
+                backgroundColor: ['#8B0000', '#ef4444', '#f59e0b', '#10b981'],
                 borderColor: '#000',
                 borderWidth: 2
             }]
@@ -756,12 +778,24 @@ function createRiskPieChart(anomalies) {
                     position: 'bottom',
                     labels: { color: '#e0e0e0', padding: 15, font: { size: 12 } }
                 },
+                title: {
+                    display: false
+                },
                 tooltip: {
                     backgroundColor: '#1a1a1a',
                     titleColor: '#fff',
                     bodyColor: '#e0e0e0',
                     borderColor: '#333',
-                    borderWidth: 1
+                    borderWidth: 1,
+                    callbacks: {
+                        label: function(context) {
+                            const label = context.label || '';
+                            const value = context.parsed || 0;
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                            return `${label}: ${value} anomalies (${percentage}%)`;
+                        }
+                    }
                 }
             }
         }
@@ -828,10 +862,12 @@ function createComputerBarChart(anomalies) {
         computerCounts[computer] = (computerCounts[computer] || 0) + 1;
     });
 
-    // Get top 10
+    // Get top 10 computers with most anomalies
     const sorted = Object.entries(computerCounts)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 10);
+
+    if (sorted.length === 0) return;
 
     destroyChart('computerBarChart');
     chartInstances['computerBarChart'] = new Chart(ctx, {
@@ -839,7 +875,7 @@ function createComputerBarChart(anomalies) {
         data: {
             labels: sorted.map(s => s[0]),
             datasets: [{
-                label: 'Anomaly Count',
+                label: 'Number of Anomalies',
                 data: sorted.map(s => s[1]),
                 backgroundColor: '#ef4444',
                 borderColor: '#dc2626',
@@ -857,82 +893,44 @@ function createComputerBarChart(anomalies) {
                     titleColor: '#fff',
                     bodyColor: '#e0e0e0',
                     borderColor: '#333',
-                    borderWidth: 1
+                    borderWidth: 1,
+                    callbacks: {
+                        label: function(context) {
+                            return `Anomalies: ${context.parsed.x}`;
+                        }
+                    }
                 }
             },
             scales: {
                 x: {
                     ticks: { color: '#9ca3af' },
-                    grid: { color: '#333' }
+                    grid: { color: '#333' },
+                    title: {
+                        display: true,
+                        text: 'Number of Anomalies',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    }
                 },
                 y: {
-                    ticks: { color: '#e0e0e0' },
-                    grid: { display: false }
+                    ticks: { 
+                        color: '#e0e0e0',
+                        font: { size: 11 }
+                    },
+                    grid: { display: false },
+                    title: {
+                        display: true,
+                        text: 'Computer Name',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    }
                 }
             }
         }
     });
 }
 
-// 4. Top Affected Users Bar Chart
-function createUserBarChart(anomalies) {
-    const ctx = document.getElementById('userBarChart');
-    if (!ctx) return;
-
-    // Count anomalies per user
-    const userCounts = {};
-    anomalies.forEach(a => {
-        const user = a.user || 'Unknown';
-        userCounts[user] = (userCounts[user] || 0) + 1;
-    });
-
-    // Get top 10
-    const sorted = Object.entries(userCounts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10);
-
-    destroyChart('userBarChart');
-    chartInstances['userBarChart'] = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: sorted.map(s => s[0]),
-            datasets: [{
-                label: 'Anomaly Count',
-                data: sorted.map(s => s[1]),
-                backgroundColor: '#f59e0b',
-                borderColor: '#d97706',
-                borderWidth: 1
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: true,
-            indexAxis: 'y',
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: '#1a1a1a',
-                    titleColor: '#fff',
-                    bodyColor: '#e0e0e0',
-                    borderColor: '#333',
-                    borderWidth: 1
-                }
-            },
-            scales: {
-                x: {
-                    ticks: { color: '#9ca3af' },
-                    grid: { color: '#333' }
-                },
-                y: {
-                    ticks: { color: '#e0e0e0' },
-                    grid: { display: false }
-                }
-            }
-        }
-    });
-}
-
-// 5. Event ID Distribution Bar Chart
+// 4. Event ID Distribution Bar Chart
 function createEventIdBarChart(anomalies) {
     const ctx = document.getElementById('eventIdBarChart');
     if (!ctx) return;
@@ -944,10 +942,12 @@ function createEventIdBarChart(anomalies) {
         eventIdCounts[eventId] = (eventIdCounts[eventId] || 0) + 1;
     });
 
-    // Get top 10
+    // Get top 10 most frequent event IDs
     const sorted = Object.entries(eventIdCounts)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 10);
+
+    if (sorted.length === 0) return;
 
     destroyChart('eventIdBarChart');
     chartInstances['eventIdBarChart'] = new Chart(ctx, {
@@ -955,7 +955,7 @@ function createEventIdBarChart(anomalies) {
         data: {
             labels: sorted.map(s => `Event ${s[0]}`),
             datasets: [{
-                label: 'Anomaly Count',
+                label: 'Number of Anomalies',
                 data: sorted.map(s => s[1]),
                 backgroundColor: '#8b5cf6',
                 borderColor: '#7c3aed',
@@ -972,37 +972,144 @@ function createEventIdBarChart(anomalies) {
                     titleColor: '#fff',
                     bodyColor: '#e0e0e0',
                     borderColor: '#333',
-                    borderWidth: 1
+                    borderWidth: 1,
+                    callbacks: {
+                        label: function(context) {
+                            return `Anomalies: ${context.parsed.y}`;
+                        }
+                    }
                 }
             },
             scales: {
                 x: {
-                    ticks: { color: '#e0e0e0', maxRotation: 45, minRotation: 45 },
-                    grid: { display: false }
+                    ticks: { 
+                        color: '#e0e0e0', 
+                        maxRotation: 45, 
+                        minRotation: 45,
+                        font: { size: 11 }
+                    },
+                    grid: { display: false },
+                    title: {
+                        display: true,
+                        text: 'Event ID',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    }
                 },
                 y: {
                     ticks: { color: '#9ca3af' },
-                    grid: { color: '#333' }
+                    grid: { color: '#333' },
+                    title: {
+                        display: true,
+                        text: 'Number of Anomalies',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    }
                 }
             }
         }
     });
 }
 
-// 6. Anomaly Timeline Chart
+// 5. Anomaly Timeline Chart
 function createTimelineChart(anomalies) {
     const ctx = document.getElementById('timelineChart');
     if (!ctx) return;
 
-    // Group by hour
+    // Group anomalies by hour of day and detect timezone
     const hourCounts = {};
+    let hasTimestamps = false;
+    let detectedTimezone = null;
+    let timezoneOffsetMinutes = null;
+    let firstTimestamp = null;
+    
     anomalies.forEach(a => {
-        if (a.timestamp) {
-            const date = new Date(a.timestamp);
-            const hour = date.getHours();
-            hourCounts[hour] = (hourCounts[hour] || 0) + 1;
+        if (a.timestamp && a.timestamp !== 'N/A') {
+            try {
+                const timestampStr = a.timestamp;
+                
+                // Store first timestamp for timezone detection
+                if (!firstTimestamp) {
+                    firstTimestamp = timestampStr;
+                }
+                
+                // Try to extract timezone from ISO string (e.g., "2024-01-15T10:30:00+05:30" or "2024-01-15T10:30:00Z")
+                if (!detectedTimezone) {
+                    // Check for timezone offset pattern (e.g., +05:30, -08:00, Z)
+                    const tzMatch = timestampStr.match(/([+-]\d{2}:\d{2}|Z)$/);
+                    if (tzMatch) {
+                        if (tzMatch[1] === 'Z') {
+                            detectedTimezone = 'UTC';
+                            timezoneOffsetMinutes = 0;
+                        } else {
+                            detectedTimezone = `UTC${tzMatch[1]}`;
+                            // Parse offset to minutes
+                            const [hours, minutes] = tzMatch[1].split(':');
+                            const hourVal = parseInt(hours);
+                            const minVal = parseInt(minutes);
+                            timezoneOffsetMinutes = hourVal * 60 + (hourVal < 0 ? -minVal : minVal);
+                        }
+                    }
+                }
+                
+                // Parse the date in UTC
+                const date = new Date(timestampStr);
+                if (!isNaN(date.getTime())) {
+                    let hour;
+                    
+                    if (timezoneOffsetMinutes !== null) {
+                        // Calculate hour in the original timezone
+                        // Get UTC time and add the timezone offset
+                        const utcHours = date.getUTCHours();
+                        const utcMinutes = date.getUTCMinutes();
+                        
+                        // Convert to minutes since midnight UTC
+                        const utcTotalMinutes = utcHours * 60 + utcMinutes;
+                        
+                        // Add timezone offset to get local time
+                        const localTotalMinutes = utcTotalMinutes + timezoneOffsetMinutes;
+                        
+                        // Handle day wraparound
+                        const adjustedMinutes = ((localTotalMinutes % 1440) + 1440) % 1440;
+                        hour = Math.floor(adjustedMinutes / 60);
+                    } else {
+                        // Fallback: use the hour from Date object (browser's interpretation)
+                        hour = date.getHours();
+                        
+                        // Try to detect timezone from the Date object
+                        const offset = -date.getTimezoneOffset(); // Minutes
+                        const hours = Math.floor(Math.abs(offset) / 60);
+                        const minutes = Math.abs(offset) % 60;
+                        const sign = offset >= 0 ? '+' : '-';
+                        detectedTimezone = `UTC${sign}${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+                        timezoneOffsetMinutes = offset;
+                    }
+                    
+                    hourCounts[hour] = (hourCounts[hour] || 0) + 1;
+                    hasTimestamps = true;
+                }
+            } catch (e) {
+                console.error('Error parsing timestamp:', a.timestamp, e);
+            }
         }
     });
+
+    // If no valid timestamps, show message
+    if (!hasTimestamps) {
+        console.log('No valid timestamps found for timeline chart');
+        return;
+    }
+
+    // Default to UTC if no timezone detected
+    if (!detectedTimezone) {
+        detectedTimezone = 'UTC';
+        timezoneOffsetMinutes = 0;
+    }
+
+    console.log('Detected timezone:', detectedTimezone);
+    console.log('Timezone offset (minutes):', timezoneOffsetMinutes);
+    console.log('First timestamp:', firstTimestamp);
+    console.log('Hour distribution:', hourCounts);
 
     // Create array for all 24 hours
     const hours = Array.from({length: 24}, (_, i) => i);
@@ -1012,15 +1119,17 @@ function createTimelineChart(anomalies) {
     chartInstances['timelineChart'] = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: hours.map(h => `${h}:00`),
+            labels: hours.map(h => `${h.toString().padStart(2, '0')}:00`),
             datasets: [{
-                label: 'Anomalies per Hour',
+                label: `Anomalies (${detectedTimezone})`,
                 data: counts,
                 borderColor: '#3b82f6',
-                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                backgroundColor: 'rgba(59, 130, 246, 0.2)',
                 borderWidth: 2,
                 fill: true,
-                tension: 0.4
+                tension: 0.4,
+                pointRadius: 3,
+                pointHoverRadius: 5
             }]
         },
         options: {
@@ -1028,31 +1137,69 @@ function createTimelineChart(anomalies) {
             maintainAspectRatio: true,
             plugins: {
                 legend: {
+                    display: true,
                     labels: { color: '#e0e0e0', font: { size: 12 } }
+                },
+                title: {
+                    display: true,
+                    text: `Timezone: ${detectedTimezone}`,
+                    color: '#9ca3af',
+                    font: { size: 11 },
+                    padding: { bottom: 10 },
+                    align: 'end'
                 },
                 tooltip: {
                     backgroundColor: '#1a1a1a',
                     titleColor: '#fff',
                     bodyColor: '#e0e0e0',
                     borderColor: '#333',
-                    borderWidth: 1
+                    borderWidth: 1,
+                    callbacks: {
+                        label: function(context) {
+                            return `Anomalies: ${context.parsed.y}`;
+                        },
+                        afterLabel: function(context) {
+                            return `Timezone: ${detectedTimezone}`;
+                        }
+                    }
                 }
             },
             scales: {
                 x: {
-                    ticks: { color: '#9ca3af', maxRotation: 45, minRotation: 45 },
-                    grid: { color: '#333' }
+                    ticks: { 
+                        color: '#9ca3af', 
+                        maxRotation: 45, 
+                        minRotation: 45,
+                        font: { size: 10 }
+                    },
+                    grid: { color: '#333' },
+                    title: {
+                        display: true,
+                        text: `Hour of Day (${detectedTimezone})`,
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    }
                 },
                 y: {
-                    ticks: { color: '#9ca3af' },
-                    grid: { color: '#333' }
+                    ticks: { 
+                        color: '#9ca3af',
+                        stepSize: 1
+                    },
+                    grid: { color: '#333' },
+                    title: {
+                        display: true,
+                        text: 'Number of Anomalies',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    },
+                    beginAtZero: true
                 }
             }
         }
     });
 }
 
-// 7. Anomaly Score Distribution Histogram
+// 6. Anomaly Score Distribution Histogram
 function createScoreHistogramChart(anomalies) {
     const ctx = document.getElementById('scoreHistogramChart');
     if (!ctx) return;
@@ -1060,11 +1207,20 @@ function createScoreHistogramChart(anomalies) {
     // Create bins for scores (0-0.1, 0.1-0.2, ..., 0.9-1.0)
     const bins = Array(10).fill(0);
     anomalies.forEach(a => {
-        const binIndex = Math.min(Math.floor(a.score * 10), 9);
+        const score = a.score || 0;
+        const binIndex = Math.min(Math.floor(score * 10), 9);
         bins[binIndex]++;
     });
 
     const labels = bins.map((_, i) => `${(i * 10)}-${(i + 1) * 10}%`);
+
+    // Color bins based on severity
+    const backgroundColors = bins.map((_, i) => {
+        if (i >= 8) return '#8B0000'; // Critical (80-100%)
+        if (i >= 6) return '#ef4444'; // High (60-80%)
+        if (i >= 4) return '#f59e0b'; // Medium (40-60%)
+        return '#10b981'; // Low (0-40%)
+    });
 
     destroyChart('scoreHistogramChart');
     chartInstances['scoreHistogramChart'] = new Chart(ctx, {
@@ -1074,8 +1230,8 @@ function createScoreHistogramChart(anomalies) {
             datasets: [{
                 label: 'Number of Anomalies',
                 data: bins,
-                backgroundColor: '#10b981',
-                borderColor: '#059669',
+                backgroundColor: backgroundColors,
+                borderColor: backgroundColors.map(c => c),
                 borderWidth: 1
             }]
         },
@@ -1084,6 +1240,7 @@ function createScoreHistogramChart(anomalies) {
             maintainAspectRatio: true,
             plugins: {
                 legend: {
+                    display: true,
                     labels: { color: '#e0e0e0', font: { size: 12 } }
                 },
                 tooltip: {
@@ -1091,27 +1248,256 @@ function createScoreHistogramChart(anomalies) {
                     titleColor: '#fff',
                     bodyColor: '#e0e0e0',
                     borderColor: '#333',
-                    borderWidth: 1
+                    borderWidth: 1,
+                    callbacks: {
+                        label: function(context) {
+                            return `Anomalies: ${context.parsed.y}`;
+                        }
+                    }
                 }
             },
             scales: {
                 x: {
-                    ticks: { color: '#e0e0e0' },
+                    ticks: { 
+                        color: '#e0e0e0',
+                        font: { size: 11 }
+                    },
                     grid: { display: false },
                     title: {
                         display: true,
-                        text: 'Anomaly Score Range',
-                        color: '#9ca3af'
+                        text: 'Anomaly Score Range (%)',
+                        color: '#9ca3af',
+                        font: { size: 12 }
                     }
                 },
                 y: {
+                    ticks: { 
+                        color: '#9ca3af',
+                        stepSize: 1
+                    },
+                    grid: { color: '#333' },
+                    title: {
+                        display: true,
+                        text: 'Number of Anomalies',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    },
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+}
+
+// Load cluster and MITRE stage data and create charts
+async function loadClusterMitreCharts() {
+    try {
+        const response = await fetch('/api/visualization/cluster_mitre');
+        const data = await response.json();
+
+        if (!response.ok) {
+            console.error('Failed to load cluster/MITRE data:', data.error);
+            return;
+        }
+
+        // Show/hide containers based on data availability
+        if (data.has_clusters) {
+            document.getElementById('clusterChartContainer').style.display = 'block';
+            createClusterBarChart(data.cluster_distribution);
+        } else {
+            document.getElementById('clusterChartContainer').style.display = 'none';
+        }
+
+        if (data.has_mitre) {
+            document.getElementById('mitreChartContainer').style.display = 'block';
+            createMitreBarChart(data.mitre_distribution);
+        } else {
+            document.getElementById('mitreChartContainer').style.display = 'none';
+        }
+
+        // Adjust grid layout if only one chart is available
+        const row = document.getElementById('clusterMitreRow');
+        if (data.has_clusters && !data.has_mitre) {
+            row.style.gridTemplateColumns = '1fr';
+        } else if (!data.has_clusters && data.has_mitre) {
+            row.style.gridTemplateColumns = '1fr';
+        } else if (data.has_clusters && data.has_mitre) {
+            row.style.gridTemplateColumns = '1fr 1fr';
+        }
+    } catch (error) {
+        console.error('Error loading cluster/MITRE charts:', error);
+    }
+}
+
+// 7. Cluster Distribution Bar Chart
+function createClusterBarChart(clusterData) {
+    const ctx = document.getElementById('clusterBarChart');
+    if (!ctx || !clusterData || Object.keys(clusterData).length === 0) return;
+
+    const labels = Object.keys(clusterData);
+    const values = Object.values(clusterData);
+
+    destroyChart('clusterBarChart');
+    chartInstances['clusterBarChart'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Number of Anomalies',
+                data: values,
+                backgroundColor: '#3b82f6',
+                borderColor: '#2563eb',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#1a1a1a',
+                    titleColor: '#fff',
+                    bodyColor: '#e0e0e0',
+                    borderColor: '#333',
+                    borderWidth: 1,
+                    callbacks: {
+                        label: function(context) {
+                            return `Anomalies: ${context.parsed.y}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: { 
+                        color: '#e0e0e0', 
+                        maxRotation: 45, 
+                        minRotation: 45,
+                        font: { size: 11 }
+                    },
+                    grid: { display: false },
+                    title: {
+                        display: true,
+                        text: 'Cluster Label',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    }
+                },
+                y: {
+                    ticks: { 
+                        color: '#9ca3af',
+                        stepSize: 1
+                    },
+                    grid: { color: '#333' },
+                    title: {
+                        display: true,
+                        text: 'Number of Anomalies',
+                        color: '#9ca3af',
+                        font: { size: 12 }
+                    },
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+}
+
+// 9. MITRE ATT&CK Stages Bar Chart
+function createMitreBarChart(mitreData) {
+    const ctx = document.getElementById('mitreBarChart');
+    if (!ctx || !mitreData || Object.keys(mitreData).length === 0) return;
+
+    // Sort stages by their stage number
+    const stageOrder = [
+        'Stage 1: Initial Access',
+        'Stage 2: Execution',
+        'Stage 2: Credential Access',
+        'Stage 3: Persistence',
+        'Stage 3: Privilege Escalation',
+        'Stage 3: Defense Evasion',
+        'Stage 4: Discovery',
+        'Stage 4: Lateral Movement',
+        'Stage 5: Collection',
+        'Stage 5: Command & Control',
+        'Stage 6: Exfiltration',
+        'Stage 7: Impact'
+    ];
+
+    const sortedEntries = Object.entries(mitreData).sort((a, b) => {
+        const indexA = stageOrder.indexOf(a[0]);
+        const indexB = stageOrder.indexOf(b[0]);
+        if (indexA === -1 && indexB === -1) return 0;
+        if (indexA === -1) return 1;
+        if (indexB === -1) return -1;
+        return indexA - indexB;
+    });
+
+    const labels = sortedEntries.map(e => e[0]);
+    const values = sortedEntries.map(e => e[1]);
+
+    // Color by stage severity (early stages are more critical)
+    const colors = labels.map(label => {
+        if (label.includes('Stage 1') || label.includes('Stage 2')) {
+            return '#ef4444'; // Red for early stages
+        } else if (label.includes('Stage 3') || label.includes('Stage 4')) {
+            return '#f59e0b'; // Orange for mid stages
+        } else {
+            return '#3b82f6'; // Blue for later stages
+        }
+    });
+
+    destroyChart('mitreBarChart');
+    chartInstances['mitreBarChart'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Number of Anomalies',
+                data: values,
+                backgroundColor: colors,
+                borderColor: colors.map(c => c),
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            indexAxis: 'y', // Horizontal bar chart
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#1a1a1a',
+                    titleColor: '#fff',
+                    bodyColor: '#e0e0e0',
+                    borderColor: '#333',
+                    borderWidth: 1,
+                    callbacks: {
+                        title: function(context) {
+                            return context[0].label;
+                        },
+                        label: function(context) {
+                            return `Anomalies: ${context.parsed.x}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
                     ticks: { color: '#9ca3af' },
                     grid: { color: '#333' },
                     title: {
                         display: true,
-                        text: 'Count',
+                        text: 'Number of Anomalies',
                         color: '#9ca3af'
                     }
+                },
+                y: {
+                    ticks: { 
+                        color: '#e0e0e0',
+                        font: { size: 11 }
+                    },
+                    grid: { display: false }
                 }
             }
         }

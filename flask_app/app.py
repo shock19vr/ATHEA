@@ -1,6 +1,7 @@
 """
 Flask Application for XAI EVTX Anomaly Detection
 One-click pipeline execution with modern UI
+Now with SQLite database integration
 """
 
 import os
@@ -22,8 +23,9 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from parser import LogParser
 from features import FeatureEngineer
-from model import AnomalyDetector
+from model import AnomalyDetector, AnomalyClusterer
 from explain import AnomalyExplainer
+from db_manager import get_db_manager
 
 app = Flask(__name__)
 app.secret_key = 'xai-evtx-anomaly-detection-secret-key-2024'
@@ -33,6 +35,20 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {'evtx', 'csv', 'json', 'log', 'txt'}
+
+# Get database manager instance (database should already exist)
+db_path = str(Path(__file__).parent.parent / "event_references.db")
+if not Path(db_path).exists():
+    print("❌ ERROR: Database not found!")
+    print(f"   Expected: {db_path}")
+    print("   Please run: python init_database.py")
+    print("   Or run the Streamlit app first to initialize the database.")
+    sys.exit(1)
+
+print(f"✅ Using database: {db_path}")
+db = get_db_manager(db_path)
+stats = db.get_statistics()
+print(f"📊 Database loaded: {stats['total_events']} events, {stats['mitre_tactics']} tactics, {stats['mitre_techniques']} techniques")
 
 # Global storage for pipeline state
 pipeline_state = {}
@@ -78,6 +94,31 @@ def clear_pipeline_state():
     session_id = get_session_id()
     if session_id in pipeline_state:
         del pipeline_state[session_id]
+
+
+def save_results_to_database(results_df: pd.DataFrame, session_id: str):
+    """Save analysis results to database"""
+    try:
+        # Save only anomalies to database
+        anomalies = results_df[results_df['Anomaly'] == 1]
+        
+        for idx, row in anomalies.iterrows():
+            result_data = {
+                'event_record_id': row.get('EventRecordID'),
+                'event_id': row.get('EventID'),
+                'computer': row.get('Computer'),
+                'timestamp': row.get('TimeCreatedISO'),
+                'anomaly': 1,
+                'anomaly_score': row.get('AnomalyScoreNormalized', 0.0),
+                'cluster_label': row.get('ClusterLabel'),
+                'mitre_stage': row.get('MITRE_Stage'),
+                'confidence': row.get('Confidence', 0.0)
+            }
+            db.insert_analysis_result(session_id, result_data)
+        
+        print(f"💾 Saved {len(anomalies)} anomalies to database (Session: {session_id[:8]}...)")
+    except Exception as e:
+        print(f"⚠️ Error saving results to database: {e}")
 
 
 @app.route('/')
@@ -211,10 +252,31 @@ def run_pipeline():
         state['results_df'] = results_df
         state['model'] = detector
         state['anomaly_count'] = int((results_df['Anomaly'] == 1).sum())
-        state['progress'] = 75
+        state['progress'] = 70
         state['message'] = f'Detected {state["anomaly_count"]} anomalies'
         
-        # Step 4: XAI Explanations
+        # Step 4: Clustering and MITRE Mapping
+        if state['anomaly_count'] > 0:
+            state['status'] = 'clustering'
+            state['progress'] = 75
+            state['message'] = 'Analyzing attack patterns...'
+            
+            anomalies = results_df[results_df['Anomaly'] == 1].copy()
+            clusterer = AnomalyClusterer(min_cluster_size=5, adaptive=True, direct_classification_threshold=10)
+            cluster_results = clusterer.cluster(anomalies, feature_cols)
+            cluster_results = clusterer.map_to_mitre_stages(cluster_results, anomalies)
+            
+            # Update results_df with cluster information
+            cluster_results.index = anomalies.index
+            for col in ['Cluster', 'ClusterLabel', 'MITRE_Stage']:
+                if col in cluster_results.columns:
+                    results_df.loc[anomalies.index, col] = cluster_results[col]
+            
+            state['results_df'] = results_df
+            state['progress'] = 80
+            state['message'] = 'Clustering completed'
+        
+        # Step 5: XAI Explanations
         state['status'] = 'xai_computation'
         state['progress'] = 85
         state['message'] = 'Computing XAI explanations...'
@@ -236,7 +298,7 @@ def run_pipeline():
         state['progress'] = 95
         state['message'] = 'XAI explanations computed'
         
-        # Step 5: Save results
+        # Step 6: Save results
         state['status'] = 'saving'
         state['progress'] = 98
         state['message'] = 'Saving results...'
@@ -244,6 +306,9 @@ def run_pipeline():
         session_id = get_session_id()
         results_path = os.path.join(app.config['RESULTS_FOLDER'], f'{session_id}_results.csv')
         results_df.to_csv(results_path, index=False)
+        
+        # Save anomalies to database
+        save_results_to_database(results_df, session_id)
         
         # Complete
         state['status'] = 'completed'
@@ -335,6 +400,41 @@ def get_results():
             'summary': summary,
             'top_anomalies': top_anomalies,
             'all_anomalies': all_anomalies
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/visualization/cluster_mitre')
+def get_cluster_mitre_data():
+    """Get cluster and MITRE stage distribution data for visualizations"""
+    try:
+        state = get_pipeline_state()
+        
+        if state['results_df'] is None:
+            return jsonify({'error': 'No results available'}), 400
+        
+        results_df = state['results_df']
+        anomalies = results_df[results_df['Anomaly'] == 1]
+        
+        # Cluster distribution
+        cluster_data = {}
+        if 'ClusterLabel' in anomalies.columns:
+            cluster_counts = anomalies['ClusterLabel'].value_counts().to_dict()
+            cluster_data = {str(k): int(v) for k, v in cluster_counts.items()}
+        
+        # MITRE stage distribution
+        mitre_data = {}
+        if 'MITRE_Stage' in anomalies.columns:
+            mitre_counts = anomalies['MITRE_Stage'].value_counts().to_dict()
+            mitre_data = {str(k): int(v) for k, v in mitre_counts.items()}
+        
+        return jsonify({
+            'cluster_distribution': cluster_data,
+            'mitre_distribution': mitre_data,
+            'has_clusters': bool(cluster_data),
+            'has_mitre': bool(mitre_data)
         })
     
     except Exception as e:

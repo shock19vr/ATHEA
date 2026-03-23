@@ -1,6 +1,7 @@
 """
 Explainable Log Anomaly Detection System
 XAI-based APT Detector with Streamlit UI
+Now with SQLite database integration for all reference data
 """
 
 import streamlit as st
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+import uuid
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,6 +20,7 @@ from features import FeatureEngineer
 from model import AnomalyDetector, AnomalyClusterer
 from explain import AnomalyExplainer
 from ui_helpers import Visualizer
+from db_manager import get_db_manager
 
 # Page configuration
 st.set_page_config(
@@ -35,8 +38,21 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Initialize database on first run
+@st.cache_resource
+def init_db():
+    """Initialize database with reference data if not exists"""
+    db_path = "event_references.db"
+    if not Path(db_path).exists():
+        st.error("❌ Database not found! Please run: `python init_database.py` first.")
+        st.stop()
+    return get_db_manager(db_path)
+
+# Initialize database
+db = init_db()
+
 # Initialize session state
-for key in ['parsed_data', 'features_df', 'results_df', 'model', 'explainer', 'feature_cols', 'training_metrics', 'gemini_api_key']:
+for key in ['parsed_data', 'features_df', 'results_df', 'model', 'explainer', 'feature_cols', 'training_metrics', 'gemini_api_key', 'session_id']:
     if key not in st.session_state:
         if key == 'feature_cols':
             st.session_state[key] = []
@@ -45,16 +61,19 @@ for key in ['parsed_data', 'features_df', 'results_df', 'model', 'explainer', 'f
         elif key == 'gemini_api_key':
             # Load from environment variable if available
             st.session_state[key] = os.getenv('GEMINI_API_KEY', '')
+        elif key == 'session_id':
+            # Generate unique session ID for this analysis session
+            st.session_state[key] = str(uuid.uuid4())
         else:
             st.session_state[key] = None
 
 def main():
-    st.markdown('<div class="main-header">🛡️ Explainable Log Anomaly Detection System</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">XAI-based APT Detector for Security Logs</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🛡️ATHEA</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Automated Threat Hunting using Explainable AI</div>', unsafe_allow_html=True)
     
     with st.sidebar:
         st.title("Navigation")
-        page = st.radio("Go to", ["📤 Upload & Parse", "🔍 Anomaly Detection", "📊 Visualization", "💡 Explainability", "📥 Export Results"])
+        page = st.radio("Go to", ["📤 Upload & Parse", "🔍 Anomaly Detection", "📊 Visualization", "💡 Explainability", "📥 Export Results", "🗄️ Database"])
         
         st.markdown("---")
         st.markdown("### Settings")
@@ -84,6 +103,8 @@ def main():
         page_explainability()
     elif page == "📥 Export Results":
         page_export()
+    elif page == "🗄️ Database":
+        page_database()
 
 def page_upload_parse():
     st.header("📤 Upload & Parse Log Files")
@@ -796,6 +817,10 @@ def detect_anomalies():
         st.session_state.model = detector
         st.session_state.results_df = results_df
         st.session_state.training_metrics = metrics
+        
+        # Save results to database
+        save_results_to_database(results_df)
+        
         st.success(f"✅ Found {metrics['n_anomalies']} anomalies")
 
 def cluster_anomalies():
@@ -899,6 +924,171 @@ def compute_shap_values():
                 st.success("✅ SHAP values computed! (Add Gemini API key for AI-powered insights)")
         except Exception as e:
             st.error(f"Error: {e}")
+
+def save_results_to_database(results_df: pd.DataFrame):
+    """Save analysis results to database"""
+    try:
+        session_id = st.session_state.session_id
+        
+        # Save only anomalies to database (to avoid cluttering)
+        anomalies = results_df[results_df['Anomaly'] == 1]
+        
+        for idx, row in anomalies.iterrows():
+            result_data = {
+                'event_record_id': row.get('EventRecordID'),
+                'event_id': row.get('EventID'),
+                'computer': row.get('Computer'),
+                'timestamp': row.get('TimeCreatedISO'),
+                'anomaly': 1,
+                'anomaly_score': row.get('AnomalyScoreNormalized', 0.0),
+                'cluster_label': row.get('ClusterLabel'),
+                'mitre_stage': row.get('MITRE_Stage'),
+                'confidence': row.get('Confidence', 0.0)
+            }
+            db.insert_analysis_result(session_id, result_data)
+        
+        print(f"💾 Saved {len(anomalies)} anomalies to database (Session: {session_id[:8]}...)")
+    except Exception as e:
+        print(f"⚠️ Error saving results to database: {e}")
+
+def page_database():
+    """Database management and statistics page"""
+    st.header("🗄️ Database Management")
+    
+    # Database statistics
+    st.subheader("📊 Database Statistics")
+    stats = db.get_statistics()
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Events", stats['total_events'])
+    with col2:
+        st.metric("Security Events", stats['security_events'])
+    with col3:
+        st.metric("Sysmon Events", stats['sysmon_events'])
+    with col4:
+        st.metric("System Events", stats['system_events'])
+    
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        st.metric("SQL Events", stats['sql_events'])
+    with col6:
+        st.metric("MITRE Tactics", stats['mitre_tactics'])
+    with col7:
+        st.metric("MITRE Techniques", stats['mitre_techniques'])
+    with col8:
+        high_risk = db.search_events_by_risk(min_risk=7)
+        st.metric("High Risk Events", len(high_risk))
+    
+    st.markdown("---")
+    
+    # Event lookup
+    st.subheader("🔍 Event Lookup")
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        event_id_lookup = st.number_input("Enter EventID", min_value=1, max_value=99999, value=4624)
+    with col2:
+        channel_lookup = st.selectbox("Channel", ["Auto-detect", "Security", "Sysmon", "System", "SQL"])
+    
+    if st.button("🔎 Lookup Event"):
+        channel = None if channel_lookup == "Auto-detect" else channel_lookup
+        event = db.get_event_by_id_and_channel(event_id_lookup, channel)
+        
+        if event:
+            st.success(f"✅ Found EventID {event_id_lookup}")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Name", event.get('name', 'N/A'))
+            with col2:
+                st.metric("Risk Score", event.get('risk_score', 'N/A'))
+            with col3:
+                st.metric("Severity", event.get('severity', 'N/A'))
+            
+            st.markdown("**Description:**")
+            st.info(event.get('description', 'No description available'))
+            
+            st.markdown("**Category:**")
+            st.write(event.get('category', 'Unknown'))
+            
+            if event.get('mitre_tactics'):
+                st.markdown("**MITRE Tactics:**")
+                st.write(", ".join(event['mitre_tactics']))
+            
+            if event.get('mitre_techniques'):
+                st.markdown("**MITRE Techniques:**")
+                st.write(", ".join(event['mitre_techniques']))
+            
+            if event.get('suspicious_when'):
+                st.markdown("**Suspicious When:**")
+                for item in event['suspicious_when']:
+                    st.write(f"- {item}")
+        else:
+            st.error(f"❌ EventID {event_id_lookup} not found in database")
+    
+    st.markdown("---")
+    
+    # High risk events
+    st.subheader("🔴 High Risk Events")
+    risk_threshold = st.slider("Minimum Risk Score", 1, 10, 7)
+    
+    high_risk_events = db.search_events_by_risk(min_risk=risk_threshold)
+    
+    if high_risk_events:
+        st.write(f"Found {len(high_risk_events)} events with risk score >= {risk_threshold}")
+        
+        # Convert to DataFrame for display
+        df_high_risk = pd.DataFrame(high_risk_events)
+        display_cols = ['event_id', 'name', 'source', 'risk_score', 'severity', 'category']
+        display_cols = [c for c in display_cols if c in df_high_risk.columns]
+        
+        if display_cols:
+            df_display = df_high_risk[display_cols].sort_values('risk_score', ascending=False)
+            st.dataframe(df_display, use_container_width=True, height=400)
+    else:
+        st.info(f"No events found with risk score >= {risk_threshold}")
+    
+    st.markdown("---")
+    
+    # Analysis history
+    st.subheader("📜 Analysis History")
+    session_id = st.session_state.session_id
+    
+    st.info(f"Current Session ID: `{session_id}`")
+    
+    anomalies = db.get_anomalies_by_session(session_id)
+    
+    if anomalies:
+        st.write(f"Found {len(anomalies)} anomalies in current session")
+        
+        df_anomalies = pd.DataFrame(anomalies)
+        display_cols = ['event_id', 'computer', 'timestamp', 'anomaly_score', 'mitre_stage', 'confidence']
+        display_cols = [c for c in display_cols if c in df_anomalies.columns]
+        
+        if display_cols:
+            df_display = df_anomalies[display_cols].sort_values('anomaly_score', ascending=False)
+            st.dataframe(df_display, use_container_width=True, height=300)
+    else:
+        st.info("No anomalies saved for current session yet. Run anomaly detection first.")
+    
+    st.markdown("---")
+    
+    # Database actions
+    st.subheader("⚙️ Database Actions")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.info("ℹ️ To reinitialize database, run: `python init_database.py`")
+    
+    with col2:
+        st.download_button(
+            label="📥 Download Database",
+            data=open("event_references.db", "rb").read(),
+            file_name=f"event_references_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+            mime="application/octet-stream"
+        )
 
 if __name__ == "__main__":
     main()
